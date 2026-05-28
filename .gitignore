@@ -1,0 +1,10 @@
+__pycache__/ 
+*.pyc 
+.env 
+results/ 
+node_modules/ 
+xplate-web/backend/data/ 
+*.db 
+alert_config.json 
+app_settings.json 
+favorites.json 

@@ -1,0 +1,20 @@
+Fix included:
+
+The original error happens because Streamlit on Windows can start Python with an event loop that does not support Playwright's Chromium subprocess.
+
+This fixed version adds the Windows Proactor event loop policy at the top of xplate_agent.py:
+
+import sys
+import asyncio
+
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
+How to use:
+1. Extract this fixed ZIP.
+2. Open the folder.
+3. Double-click setup.bat again.
+4. Double-click run_app.bat.
