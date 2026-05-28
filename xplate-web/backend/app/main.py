@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 import uuid
@@ -53,14 +54,21 @@ from . import plate_tracking
 
 app = FastAPI(title="Xplate Scout API")
 
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://eliteplates-six.vercel.app",
+]
+
+frontend_url = os.getenv("FRONTEND_URL")
+if frontend_url and frontend_url not in allowed_origins:
+    allowed_origins.append(frontend_url)
+
+print("Allowed CORS origins:", allowed_origins)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
