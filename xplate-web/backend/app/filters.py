@@ -2,7 +2,7 @@ from datetime import datetime
 from statistics import mean
 from typing import Any
 
-from .scraper import matches_number_format, price_to_number, sort_results
+from .scraper import match_number_formats, price_to_number, sort_results
 
 
 def clean_value(value: Any, fallback: str = "?") -> str:
@@ -56,10 +56,11 @@ def apply_filters(rows: list[dict[str, Any]], request) -> list[dict[str, Any]]:
     filtered = [normalize_row(row) for row in rows]
     if request.code:
         filtered = [row for row in filtered if row.get("code") == request.code]
-    if request.number_format and request.number_format != "Any format":
+    selected_formats = getattr(request, "number_formats", []) or []
+    if selected_formats or (request.number_format and request.number_format != "Any format"):
         filtered = [
             row for row in filtered
-            if matches_number_format(row.get("plate_number", ""), request.number_format)
+            if match_number_formats(row.get("plate_number", ""), selected_formats, fallback=request.number_format).get("matched")
         ]
     prices = [price_to_number(row.get("price", "")) for row in filtered]
     numeric_prices = [price for price in prices if price is not None]

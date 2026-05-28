@@ -53,6 +53,7 @@ const DEFAULT_ALERT = {
   starts_with: '',
   ends_with: '',
   number_format: 'Any format',
+  number_formats: [],
   check_interval_minutes: 10,
   check_interval_seconds: 20,
   monitoring_interval_seconds: 20,
@@ -175,7 +176,8 @@ function statusBadge(status) {
 }
 
 function ruleSummary(alert) {
-  const format = alert.number_format && alert.number_format !== 'Any format' ? ` Format: ${alert.number_format}.` : ''
+  const formatText = formatRuleFormats(alert)
+  const format = formatText !== 'Any format' ? ` Format: ${formatText}.` : ''
   const city = selectedRuleCities(alert).join(', ') || 'all cities'
   if (alert.send_all_new_plates) return `Every new plate from ${city} will be sent to Telegram.${format}`
   const number = alert.plate_number ? `${alert.search_mode} ${alert.plate_number}` : 'any plate number'
@@ -252,6 +254,49 @@ function groupedNumberFormats(options = []) {
     else groups.General.push(value)
   })
   return groups
+}
+
+function numberFormatValue(label) {
+  const text = String(label || '').trim()
+  if (!text || text === 'Any format') return ''
+  const repeat = text.match(/^Contains digit repeated (\d+) times$/)
+  if (repeat) return `repeat_${repeat[1]}`
+  const pattern = text.match(/^(.+) \((\d+) Digits\)$/)
+  if (pattern) return `${pattern[1]}_${pattern[2]}`
+  return text
+}
+
+function flattenNumberFormats(groups) {
+  const options = [{ value: '', label: 'Any format', group: 'General' }]
+  Object.entries(groups).forEach(([group, items]) => {
+    items.forEach((label) => {
+      if (label === 'Any format') return
+      options.push({ value: numberFormatValue(label), label, group })
+    })
+  })
+  return options.filter((item, index, all) => all.findIndex((other) => other.value === item.value && other.label === item.label) === index)
+}
+
+function normalizeNumberFormatValues(value, fallback = '') {
+  const raw = Array.isArray(value) ? value : (value ? [value] : [])
+  const values = raw
+    .map((item) => numberFormatValue(item))
+    .filter(Boolean)
+  if (!values.length && fallback && fallback !== 'Any format') values.push(numberFormatValue(fallback))
+  return Array.from(new Set(values.filter(Boolean)))
+}
+
+function numberFormatLabels(value, fallback, options = []) {
+  const selected = normalizeNumberFormatValues(value, fallback)
+  const labelByValue = new Map(options.map((item) => [item.value, item.label]))
+  return selected.map((item) => labelByValue.get(item) || item)
+}
+
+function formatRuleFormats(alert, options = [], compact = false) {
+  const labels = numberFormatLabels(alert.number_formats, alert.number_format, options)
+  if (!labels.length) return 'Any format'
+  if (compact && labels.length > 3) return `${labels.length} selected`
+  return labels.join(', ')
 }
 
 function formatRuleTimestamp(value) {
@@ -409,6 +454,8 @@ export default function Alerts({ options = {} }) {
   const [instagramDirty, setInstagramDirty] = useState(false)
   const [instagramLastSavedAt, setInstagramLastSavedAt] = useState('')
   const [instagramAccountsText, setInstagramAccountsText] = useState('')
+  const [formatMenuOpen, setFormatMenuOpen] = useState(false)
+  const [formatQuery, setFormatQuery] = useState('')
 
   const mergedOptions = {
     codes: options.codes || CODE_OPTIONS,
@@ -425,6 +472,14 @@ export default function Alerts({ options = {} }) {
   const selectedIntervalSeconds = Number(form.monitoring_interval_seconds || form.check_interval_seconds || (Number(form.check_interval_minutes || 1) * 60) || 20)
   const customIntervalSelected = form.monitoring_interval_mode === 'custom' || !presetIntervalSeconds.includes(selectedIntervalSeconds)
   const numberFormatGroups = groupedNumberFormats(mergedOptions.number_formats)
+  const numberFormatOptions = flattenNumberFormats(numberFormatGroups)
+  const selectedNumberFormats = normalizeNumberFormatValues(form.number_formats, form.number_format)
+  const selectedNumberFormatLabels = numberFormatLabels(selectedNumberFormats, '', numberFormatOptions)
+  const formatQueryText = formatQuery.trim().toLowerCase()
+  const visibleNumberFormatGroups = Object.fromEntries(Object.entries(numberFormatGroups).map(([group, items]) => [
+    group,
+    items.filter((item) => !formatQueryText || item.toLowerCase().includes(formatQueryText)),
+  ]))
   const instagramAccounts = parseInstagramAccounts(instagramAccountsText || (instagramSettings.accounts || []).map((account) => account.username || account).join('\n'))
   const instagramProviderConfigured = Boolean(
     (instagramSettings.instagram_provider || 'Apify') !== 'Apify' ||
@@ -490,6 +545,21 @@ export default function Alerts({ options = {} }) {
       cities: normalizedCities,
       city: normalizedCities[0] || '',
     }))
+  }
+
+  function updateNumberFormats(nextValue) {
+    setForm((current) => {
+      if (!nextValue) return { ...current, number_formats: [], number_format: 'Any format' }
+      const currentValues = normalizeNumberFormatValues(current.number_formats, current.number_format)
+      const exists = currentValues.includes(nextValue)
+      const nextValues = exists ? currentValues.filter((item) => item !== nextValue) : [...currentValues, nextValue]
+      const labels = numberFormatLabels(nextValues, '', numberFormatOptions)
+      return {
+        ...current,
+        number_formats: nextValues,
+        number_format: labels[0] || 'Any format',
+      }
+    })
   }
 
   function updateSettingsField(key, value) {
@@ -713,6 +783,8 @@ export default function Alerts({ options = {} }) {
     setForm(DEFAULT_ALERT)
     setEditing(null)
     setMessage('')
+    setFormatMenuOpen(false)
+    setFormatQuery('')
   }
 
   async function handleSave() {
@@ -739,7 +811,8 @@ export default function Alerts({ options = {} }) {
         starts_with: form.starts_with,
         ends_with: form.ends_with,
         price_max: form.price_max,
-        number_format: form.number_format,
+        number_formats: selectedNumberFormats,
+        number_format: selectedNumberFormatLabels[0] || 'Any format',
         monitoring_interval_seconds: selectedIntervalSeconds,
         check_interval_seconds: selectedIntervalSeconds,
       }
@@ -762,9 +835,12 @@ export default function Alerts({ options = {} }) {
   function beginEdit(alert) {
     const cities = selectedRuleCities(alert)
     setEditing(alert.id)
-    setForm(normalizeIntervalFields({ ...DEFAULT_ALERT, ...alert, city: cities[0] || '', cities }))
+    const formats = normalizeNumberFormatValues(alert.number_formats, alert.number_format)
+    setForm(normalizeIntervalFields({ ...DEFAULT_ALERT, ...alert, city: cities[0] || '', cities, number_formats: formats, number_format: formatRuleFormats({ ...alert, number_formats: formats }, numberFormatOptions).split(', ')[0] || 'Any format' }))
     setActiveTab('Alert Rules')
     setMessage('')
+    setFormatMenuOpen(false)
+    setFormatQuery('')
   }
 
   async function withWorking(alert, action, successMessage, actionName = 'working') {
@@ -809,7 +885,8 @@ export default function Alerts({ options = {} }) {
       setBaselineSuccess('Baseline reset successfully. Future listings only.')
       if (response.alert) {
         const cities = selectedRuleCities(response.alert)
-        setForm((current) => ({ ...current, ...response.alert, city: cities[0] || '', cities }))
+        const formats = normalizeNumberFormatValues(response.alert.number_formats, response.alert.number_format)
+        setForm((current) => ({ ...current, ...response.alert, city: cities[0] || '', cities, number_formats: formats }))
       }
       return response
     }, (response) => response.message || 'Baseline reset. Future listings only.', 'baseline')
@@ -910,11 +987,13 @@ export default function Alerts({ options = {} }) {
           const badgeLabel = !ready ? 'Telegram not ready' : enabled ? 'Enabled' : 'Disabled'
           const moreOpen = openMoreRuleId === alert.id
           const advancedOpen = expandedAdvancedRuleId === alert.id
+          const formatSummary = formatRuleFormats(alert, numberFormatOptions, true)
+          const formatDetails = formatRuleFormats(alert, numberFormatOptions)
           const mainRows = [
             ['City', formatRuleCities(alert)],
             ['Code', alert.code || 'Any'],
             ['Plate / keyword', formatRulePlate(alert)],
-            ['Format', alert.number_format || 'Any format'],
+            ['Format', formatSummary],
             ['Interval', formatCompactInterval(alert)],
           ]
           const statusRows = [
@@ -925,6 +1004,7 @@ export default function Alerts({ options = {} }) {
           const advancedRows = [
             ['Baseline status', alert.baseline_created && alert.baseline_completed ? 'Ready' : 'Creating on next run'],
             ['Seen count', seenCount(alert)],
+            ['Number formats', formatDetails],
             ['Last scan result', alert.last_status || 'Never'],
             ['Last skip reason', alert.last_skip_reason || 'None'],
             ['Pages scanned', alert.last_pages_scanned || 0],
@@ -993,6 +1073,8 @@ export default function Alerts({ options = {} }) {
                           <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${item.would_send ? 'bg-emerald-500/15 text-emerald-200' : 'bg-slate-800 text-slate-300'}`}>{item.would_send ? 'Would send' : 'Would skip'}</span>
                         </div>
                         <p className="mt-1 text-slate-400">City: {item.listing_city || '?'} | Posted: {item.posted_text || '?'} | Price: {item.price || '?'}</p>
+                        <p className="mt-1 text-slate-400">Listing number: {item.listing_number || '?'} | Selected formats: {(item.selected_formats || []).join(', ') || 'Any format'}</p>
+                        <p className="mt-1 text-slate-400">Format matched: {item.format_matched_text || (item.format_matched ? 'yes' : 'no')}{item.matched_format_name ? ` | ${item.matched_format_name}` : ''}</p>
                         <p className="mt-1 break-words text-slate-500">{item.skip_reason}</p>
                       </div>
                     ))}
@@ -1058,18 +1140,54 @@ export default function Alerts({ options = {} }) {
                       setForm((current) => ({ ...current, search_mode: value, send_all_new_plates: value === 'Send all new plates' }))
                     }}>{['Send all new plates', ...mergedOptions.search_modes].filter((item, index, all) => all.indexOf(item) === index).map((item) => <option key={item}>{item}</option>)}</select></Field>
                     <Field label="Number Format">
-                      <select className="input" value={form.number_format || 'Any format'} onChange={(event) => updateField('number_format', event.target.value)}>
-                        {Object.entries(numberFormatGroups).map(([group, items]) => items.length ? (
-                          <optgroup key={group} label={group}>
-                            {items.map((item) => <option key={item} value={item}>{item}</option>)}
-                          </optgroup>
-                        ) : null)}
-                      </select>
+                      <div className="relative">
+                        <button type="button" className="input flex min-h-[46px] items-center justify-between gap-3 text-left" onClick={() => setFormatMenuOpen((open) => !open)}>
+                          <span className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+                            {selectedNumberFormatLabels.length ? selectedNumberFormatLabels.slice(0, 3).map((label) => (
+                              <span key={label} className="max-w-full truncate rounded-full bg-purple-500/15 px-2 py-1 text-xs font-bold text-purple-100">{label}</span>
+                            )) : <span className="text-slate-400">Any format</span>}
+                            {selectedNumberFormatLabels.length > 3 && <span className="rounded-full bg-slate-800 px-2 py-1 text-xs font-bold text-slate-200">{selectedNumberFormatLabels.length} selected</span>}
+                          </span>
+                          <ChevronDown size={16} className={`shrink-0 text-slate-400 transition ${formatMenuOpen ? 'rotate-180' : ''}`} />
+                        </button>
+                        {formatMenuOpen && (
+                          <div className="absolute z-40 mt-2 max-h-80 w-full overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl">
+                            <div className="border-b border-slate-800 p-2">
+                              <input className="input h-10" value={formatQuery} onChange={(event) => setFormatQuery(event.target.value)} placeholder="Search formats" />
+                            </div>
+                            <div className="max-h-64 overflow-auto p-2">
+                              <button type="button" className={`mb-1 flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm ${selectedNumberFormats.length === 0 ? 'bg-purple-500/20 text-purple-100' : 'text-slate-200 hover:bg-slate-900'}`} onClick={() => updateNumberFormats('')}>
+                                <span>Any format</span>
+                                {selectedNumberFormats.length === 0 && <span className="text-xs font-bold">Selected</span>}
+                              </button>
+                              {Object.entries(visibleNumberFormatGroups).map(([group, items]) => items.filter((item) => item !== 'Any format').length ? (
+                                <div key={group} className="py-1">
+                                  <p className="px-3 py-1 text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">{group}</p>
+                                  {items.filter((item) => item !== 'Any format').map((item) => {
+                                    const value = numberFormatValue(item)
+                                    const checked = selectedNumberFormats.includes(value)
+                                    return (
+                                      <button key={item} type="button" className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm ${checked ? 'bg-purple-500/20 text-purple-100' : 'text-slate-200 hover:bg-slate-900'}`} onClick={() => updateNumberFormats(value)}>
+                                        <span>{item}</span>
+                                        <span className={`ml-3 h-4 w-4 rounded border ${checked ? 'border-purple-300 bg-purple-400' : 'border-slate-600'}`} />
+                                      </button>
+                                    )
+                                  })}
+                                </div>
+                              ) : null)}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </Field>
                     <Field label="Max price"><input className="input" value={form.price_max} onChange={(event) => updateField('price_max', event.target.value)} placeholder="40000" /></Field>
                     <Field label="Contains"><input className="input" value={form.contains} onChange={(event) => updateField('contains', event.target.value)} placeholder="77" /></Field>
                     <Field label="Starts with"><input className="input" value={form.starts_with} onChange={(event) => updateField('starts_with', event.target.value)} placeholder="12" /></Field>
                     <Field label="Ends with"><input className="input" value={form.ends_with} onChange={(event) => updateField('ends_with', event.target.value)} placeholder="00" /></Field>
+                  </div>
+                  <div className="mt-5 rounded-2xl bg-slate-900/70 p-4 text-sm">
+                    <p className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Rule Preview</p>
+                    <p className="mt-2 text-slate-300">Number formats: <span className="font-bold text-white">{selectedNumberFormatLabels.length ? selectedNumberFormatLabels.join(', ') : 'Any format'}</span></p>
                   </div>
                   <div className="mt-6 space-y-4 border-t border-slate-800 pt-5">
                     <ToggleRow icon={Gauge} title="Immediate alerts mode" description="Scan frequently and send every newly released plate as soon as it appears on Xplate." checked={form.immediate_alerts_mode !== false} onChange={updateImmediateMode} />

@@ -77,79 +77,52 @@ RESULT_COLUMNS = [
     "source_url",
 ]
 
-NUMBER_FORMAT_OPTIONS = [
-    "Any format",
-    "Contains digit repeated 2 times",
-    "Contains digit repeated 3 times",
-    "Contains digit repeated 4 times",
-    "x??x (5 Digits)",
-    "xyzyx (5 Digits)",
-    "xxyx (5 Digits)",
-    "?xxx? (5 Digits)",
-    "xyyx (5 Digits)",
-    "xyyyx (5 Digits)",
-    "??xxx (5 Digits)",
-    "xxx?? (5 Digits)",
-    "xyyy (5 Digits)",
-    "xxyy (5 Digits)",
-    "xxxxx (5 Digits)",
-    "xyxxx (5 Digits)",
-    "xxxyx (5 Digits)",
-    "xyxx (5 Digits)",
-    "xxxx (5 Digits)",
-    "x??x (4 Digits)",
-    "xyyx (4 Digits)",
-    "xyxy (4 Digits)",
-    "??x? (4 Digits)",
-    "xxxy (4 Digits)",
-    "xyyy (4 Digits)",
-    "xyxx (4 Digits)",
-    "xxyx (4 Digits)",
-    "xxyy (4 Digits)",
-    "xxxx (4 Digits)",
-    "xyx (3 Digits)",
-    "xyz (3 Digits)",
-    "xyy (3 Digits)",
-    "xxy (3 Digits)",
-    "xxx (3 Digits)",
+NUMBER_FORMAT_CATALOG = [
+    {"id": "repeat_2", "label": "Contains digit repeated 2 times", "group": "General", "repeat": 2},
+    {"id": "repeat_3", "label": "Contains digit repeated 3 times", "group": "General", "repeat": 3},
+    {"id": "repeat_4", "label": "Contains digit repeated 4 times", "group": "General", "repeat": 4},
+    {"id": "x???x_5", "label": "x???x (5 Digits)", "group": "5 Digits", "pattern": "x???x", "length": 5},
+    {"id": "xyzyx_5", "label": "xyzyx (5 Digits)", "group": "5 Digits", "pattern": "xyzyx", "length": 5},
+    {"id": "xxyxx_5", "label": "xxyxx (5 Digits)", "group": "5 Digits", "pattern": "xxyxx", "length": 5},
+    {"id": "?xxx?_5", "label": "?xxx? (5 Digits)", "group": "5 Digits", "pattern": "?xxx?", "length": 5},
+    {"id": "xyxyx_5", "label": "xyxyx (5 Digits)", "group": "5 Digits", "pattern": "xyxyx", "length": 5},
+    {"id": "xyyyx_5", "label": "xyyyx (5 Digits)", "group": "5 Digits", "pattern": "xyyyx", "length": 5},
+    {"id": "??xx?_5", "label": "??xx? (5 Digits)", "group": "5 Digits", "pattern": "??xx?", "length": 5},
+    {"id": "xxx??_5", "label": "xxx?? (5 Digits)", "group": "5 Digits", "pattern": "xxx??", "length": 5},
+    {"id": "xyyyy_5", "label": "xyyyy (5 Digits)", "group": "5 Digits", "pattern": "xyyyy", "length": 5},
+    {"id": "xxyyy_5", "label": "xxyyy (5 Digits)", "group": "5 Digits", "pattern": "xxyyy", "length": 5},
+    {"id": "xxxyy_5", "label": "xxxyy (5 Digits)", "group": "5 Digits", "pattern": "xxxyy", "length": 5},
+    {"id": "xxxyx_5", "label": "xxxyx (5 Digits)", "group": "5 Digits", "pattern": "xxxyx", "length": 5},
+    {"id": "xyxxx_5", "label": "xyxxx (5 Digits)", "group": "5 Digits", "pattern": "xyxxx", "length": 5},
+    {"id": "xxxxy_5", "label": "xxxxy (5 Digits)", "group": "5 Digits", "pattern": "xxxxy", "length": 5},
+    {"id": "xyxxy_5", "label": "xyxxy (5 Digits)", "group": "5 Digits", "pattern": "xyxxy", "length": 5},
+    {"id": "xxxxx_5", "label": "xxxxx (5 Digits)", "group": "5 Digits", "pattern": "xxxxx", "length": 5},
+    {"id": "x??x_4", "label": "x??x (4 Digits)", "group": "4 Digits", "pattern": "x??x", "length": 4},
+    {"id": "xyyx_4", "label": "xyyx (4 Digits)", "group": "4 Digits", "pattern": "xyyx", "length": 4},
+    {"id": "xyxy_4", "label": "xyxy (4 Digits)", "group": "4 Digits", "pattern": "xyxy", "length": 4},
+    {"id": "?xx?_4", "label": "?xx? (4 Digits)", "group": "4 Digits", "pattern": "?xx?", "length": 4},
+    {"id": "xxxy_4", "label": "xxxy (4 Digits)", "group": "4 Digits", "pattern": "xxxy", "length": 4},
+    {"id": "xyyy_4", "label": "xyyy (4 Digits)", "group": "4 Digits", "pattern": "xyyy", "length": 4},
+    {"id": "xyxx_4", "label": "xyxx (4 Digits)", "group": "4 Digits", "pattern": "xyxx", "length": 4},
+    {"id": "xxyx_4", "label": "xxyx (4 Digits)", "group": "4 Digits", "pattern": "xxyx", "length": 4},
+    {"id": "xxyy_4", "label": "xxyy (4 Digits)", "group": "4 Digits", "pattern": "xxyy", "length": 4},
+    {"id": "xxxx_4", "label": "xxxx (4 Digits)", "group": "4 Digits", "pattern": "xxxx", "length": 4},
+    {"id": "xyx_3", "label": "xyx (3 Digits)", "group": "3 Digits", "pattern": "xyx", "length": 3},
+    {"id": "xyz_3", "label": "xyz (3 Digits)", "group": "3 Digits", "pattern": "xyz", "length": 3},
+    {"id": "xyy_3", "label": "xyy (3 Digits)", "group": "3 Digits", "pattern": "xyy", "length": 3},
+    {"id": "xxy_3", "label": "xxy (3 Digits)", "group": "3 Digits", "pattern": "xxy", "length": 3},
+    {"id": "xxx_3", "label": "xxx (3 Digits)", "group": "3 Digits", "pattern": "xxx", "length": 3},
 ]
 
-FORMAT_TO_URL_VALUE = {
-    "Any format": "",
-    "Contains digit repeated 2 times": "",
-    "Contains digit repeated 3 times": "",
-    "Contains digit repeated 4 times": "",
-    "x??x (5 Digits)": "x??x",
-    "xyzyx (5 Digits)": "xyzyx",
-    "xxyx (5 Digits)": "xxyx",
-    "?xxx? (5 Digits)": "?xxx?",
-    "xyyx (5 Digits)": "xyyx",
-    "xyyyx (5 Digits)": "xyyyx",
-    "??xxx (5 Digits)": "??xxx",
-    "xxx?? (5 Digits)": "xxx??",
-    "xyyy (5 Digits)": "xyyy",
-    "xxyy (5 Digits)": "xxyy",
-    "xxxxx (5 Digits)": "xxxxx",
-    "xyxxx (5 Digits)": "xyxxx",
-    "xxxyx (5 Digits)": "xxxyx",
-    "xyxx (5 Digits)": "xyxx",
-    "xxxx (5 Digits)": "xxxx",
-    "x??x (4 Digits)": "x??x",
-    "xyyx (4 Digits)": "xyyx",
-    "xyxy (4 Digits)": "xyxy",
-    "??x? (4 Digits)": "??x?",
-    "xxxy (4 Digits)": "xxxy",
-    "xyyy (4 Digits)": "xyyy",
-    "xyxx (4 Digits)": "xyxx",
-    "xxyx (4 Digits)": "xxyx",
-    "xxyy (4 Digits)": "xxyy",
-    "xxxx (4 Digits)": "xxxx",
-    "xyx (3 Digits)": "xyx",
-    "xyz (3 Digits)": "xyz",
-    "xxy (3 Digits)": "xxy",
-    "xyy (3 Digits)": "xyy",
-    "xxx (3 Digits)": "xxx",
-}
+NUMBER_FORMAT_OPTIONS = [
+    "Any format",
+    *[item["label"] for item in NUMBER_FORMAT_CATALOG],
+]
+
+FORMAT_BY_ID = {item["id"]: item for item in NUMBER_FORMAT_CATALOG}
+FORMAT_BY_LABEL = {item["label"]: item for item in NUMBER_FORMAT_CATALOG}
+FORMAT_LABEL_BY_ID = {item["id"]: item["label"] for item in NUMBER_FORMAT_CATALOG}
+FORMAT_TO_URL_VALUE = {"Any format": "", **{item["label"]: item.get("pattern", "") for item in NUMBER_FORMAT_CATALOG}}
 
 HEADERS = {
     "User-Agent": (
@@ -199,6 +172,35 @@ def normalize_search_mode(search_mode: str) -> str:
     return "contains"
 
 
+def normalize_number_formats(value: str | list[str] | tuple[str, ...] | None, fallback: str | None = None) -> list[str]:
+    raw_values: list[str] = []
+    if isinstance(value, (list, tuple)):
+        raw_values.extend(str(item or "").strip() for item in value)
+    elif value is not None:
+        raw_values.append(str(value or "").strip())
+    if not raw_values and fallback:
+        raw_values.append(str(fallback or "").strip())
+
+    normalized: list[str] = []
+    for raw in raw_values:
+        if not raw or raw == "Any format":
+            continue
+        if raw in FORMAT_BY_ID:
+            item_id = raw
+        elif raw in FORMAT_BY_LABEL:
+            item_id = str(FORMAT_BY_LABEL[raw]["id"])
+        else:
+            item_id = raw
+        if item_id not in normalized:
+            normalized.append(item_id)
+    return normalized
+
+
+def number_format_label(selected_format: str) -> str:
+    selected_format = str(selected_format or "").strip()
+    return FORMAT_LABEL_BY_ID.get(selected_format, selected_format)
+
+
 def matches_number_format(number: str, selected_format: str) -> bool:
     number = str(number or "").strip()
     digits = "".join(ch for ch in number if ch.isdigit())
@@ -206,6 +208,17 @@ def matches_number_format(number: str, selected_format: str) -> bool:
 
     if selected_format == "Any format":
         return True
+
+    meta = FORMAT_BY_ID.get(selected_format) or FORMAT_BY_LABEL.get(selected_format)
+    if meta:
+        required_length = int(meta.get("length") or 0) or None
+        if required_length is not None and len(digits) != required_length:
+            return False
+        repeat = meta.get("repeat")
+        if repeat:
+            return any(digits.count(digit) >= int(repeat) for digit in set(digits))
+        pattern = str(meta.get("pattern") or "")
+        return _matches_pattern(digits, pattern) if pattern else True
 
     required_length = get_required_digit_length(selected_format)
     if required_length is not None and len(digits) != required_length:
@@ -232,6 +245,41 @@ def matches_number_format(number: str, selected_format: str) -> bool:
     return _matches_pattern(digits, pattern)
 
 
+def match_number_formats(number: str, selected_formats: str | list[str] | tuple[str, ...] | None, fallback: str | None = None) -> dict[str, str | bool | list[str]]:
+    formats = normalize_number_formats(selected_formats, fallback=fallback)
+    selected_labels = [number_format_label(item) for item in formats]
+    if not formats:
+        return {
+            "allowed": True,
+            "matched": True,
+            "matched_format": "",
+            "matched_format_name": "",
+            "selected_formats": [],
+            "selected_format_labels": [],
+            "skip_reason": "",
+        }
+    for item in formats:
+        if matches_number_format(number, item):
+            return {
+                "allowed": True,
+                "matched": True,
+                "matched_format": item,
+                "matched_format_name": number_format_label(item),
+                "selected_formats": formats,
+                "selected_format_labels": selected_labels,
+                "skip_reason": "",
+            }
+    return {
+        "allowed": False,
+        "matched": False,
+        "matched_format": "",
+        "matched_format_name": "",
+        "selected_formats": formats,
+        "selected_format_labels": selected_labels,
+        "skip_reason": "number format did not match selected formats",
+    }
+
+
 def _matches_pattern(digits: str, pattern: str) -> bool:
     if len(digits) != len(pattern):
         return False
@@ -255,12 +303,18 @@ def _matches_pattern(digits: str, pattern: str) -> bool:
 def get_format_pattern(selected_format: str) -> str:
     if not selected_format or selected_format == "Any format":
         return ""
+    meta = FORMAT_BY_ID.get(selected_format) or FORMAT_BY_LABEL.get(selected_format)
+    if meta:
+        return str(meta.get("pattern") or "")
     if selected_format.startswith("Contains digit repeated"):
         return ""
     return FORMAT_TO_URL_VALUE.get(selected_format, selected_format.split("(")[0].strip())
 
 
 def get_required_digit_length(selected_format: str) -> int | None:
+    meta = FORMAT_BY_ID.get(selected_format) or FORMAT_BY_LABEL.get(selected_format)
+    if meta and meta.get("length"):
+        return int(meta["length"])
     if "(5 Digits)" in selected_format:
         return 5
     if "(4 Digits)" in selected_format:
@@ -919,6 +973,7 @@ def search_xplate(
     min_price: str = "",
     cities: list[str] | None = None,
     number_format: str = "Any format",
+    number_formats: list[str] | None = None,
     search_depth: str = "All pages",
     sort_mode: str = "Newest first",
     delay_seconds: float = 0,
@@ -954,10 +1009,12 @@ def search_xplate(
     rows: list[dict[str, str]] = []
     global_seen_page_links: set[str] = set()
     max_pages = int(max_pages_override or search_depth_to_max_pages(search_depth))
+    selected_number_formats = normalize_number_formats(number_formats, fallback=number_format)
+    url_number_format = selected_number_formats[0] if len(selected_number_formats) == 1 else "Any format"
 
-    debug_print(f"Selected format: {number_format}", debug_callback)
-    debug_print(f"URL format value: {get_format_pattern(number_format) or '(none)'}", debug_callback)
-    debug_print(f"Required digit length: {get_required_digit_length(number_format) or '(none)'}", debug_callback)
+    debug_print(f"Selected formats: {', '.join(number_format_label(item) for item in selected_number_formats) if selected_number_formats else 'Any format'}", debug_callback)
+    debug_print(f"URL format value: {get_format_pattern(url_number_format) or '(none)'}", debug_callback)
+    debug_print(f"Required digit length: {get_required_digit_length(url_number_format) or '(none)'}", debug_callback)
 
     total_city_count = max(len(selected_cities), 1)
     page_plan = max_pages if search_depth != "All pages" else None
@@ -979,7 +1036,7 @@ def search_xplate(
                 price_max=max_price,
                 starts_with=direct_starts_with,
                 ends_with=direct_ends_with,
-                selected_format=number_format,
+                selected_format=url_number_format,
                 page=city_page,
             )
             debug_print(f"Scraping URL: {url}", debug_callback)
@@ -1099,9 +1156,12 @@ def search_xplate(
         unique_rows = filter_exact_matches(unique_rows, number)
         debug_print(f"Exact-match filter removed {before_count - len(unique_rows)} rows", debug_callback)
 
-    if number_format and number_format != "Any format":
+    if selected_number_formats:
         before_count = len(unique_rows)
-        unique_rows = [row for row in unique_rows if matches_number_format(row.get("plate_number", ""), number_format)]
+        unique_rows = [
+            row for row in unique_rows
+            if match_number_formats(row.get("plate_number", ""), selected_number_formats).get("matched")
+        ]
         debug_print(f"Final after local filtering: {len(unique_rows)}", debug_callback)
         debug_print(f"Number-format filter removed {before_count - len(unique_rows)} rows", debug_callback)
 

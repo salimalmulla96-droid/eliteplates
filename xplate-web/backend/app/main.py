@@ -26,10 +26,13 @@ from .models import (
 )
 from .scraper import (
     CITIES,
+    NUMBER_FORMAT_CATALOG,
     NUMBER_FORMAT_OPTIONS,
     get_format_pattern,
     get_required_digit_length,
     get_seller_plates,
+    normalize_number_formats,
+    number_format_label,
     price_to_number,
     search_xplate,
     sort_results,
@@ -152,6 +155,13 @@ def _selected_cities(request: SearchRequest) -> list[str] | None:
     return cities or None
 
 
+def _normalize_alert_number_formats(alert: dict[str, Any]) -> list[str]:
+    formats = normalize_number_formats(alert.get("number_formats"), fallback=alert.get("number_format"))
+    alert["number_formats"] = formats
+    alert["number_format"] = number_format_label(formats[0]) if formats else "Any format"
+    return formats
+
+
 def _run_search(request: SearchRequest, progress_callback=None) -> dict[str, Any]:
     global LATEST_RESULTS, LATEST_DEBUG
     debug: list[str] = []
@@ -170,6 +180,7 @@ def _run_search(request: SearchRequest, progress_callback=None) -> dict[str, Any
         max_price=request.price_max,
         cities=_selected_cities(request),
         number_format=request.number_format,
+        number_formats=request.number_formats,
         search_depth=request.search_depth,
         sort_mode=request.sort,
         debug_callback=collect_debug,
@@ -186,6 +197,7 @@ def _run_search(request: SearchRequest, progress_callback=None) -> dict[str, Any
         "debug": {
             "lines": debug,
             "selected_format": request.number_format,
+            "selected_formats": [number_format_label(item) for item in normalize_number_formats(request.number_formats, fallback=request.number_format)],
             "url_format_value": get_format_pattern(request.number_format),
             "required_digit_length": get_required_digit_length(request.number_format),
             "final_count": len(results),
@@ -246,6 +258,7 @@ def options():
     return {
         "cities": CITIES,
         "number_formats": NUMBER_FORMAT_OPTIONS,
+        "number_format_catalog": NUMBER_FORMAT_CATALOG,
         "codes": ['Any code', '?', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'R', 'S', 'T', 'X', 'Y', 'Z', 'AA', 'BB', 'CC'],
         "search_modes": ['exact match', 'contains', 'starts with', 'ends with'],
         "intervals": [20, 30, 60, 300],
@@ -559,8 +572,13 @@ def api_get_alerts():
             changed = True
         previous_cities = list(alert.get('cities') or [])
         previous_city = alert.get('city', '')
+        previous_formats = list(alert.get('number_formats') or [])
+        previous_format = alert.get('number_format', '')
         _normalize_alert_cities(alert)
+        _normalize_alert_number_formats(alert)
         if alert.get('cities') != previous_cities or alert.get('city', '') != previous_city:
+            changed = True
+        if alert.get('number_formats') != previous_formats or alert.get('number_format', '') != previous_format:
             changed = True
         alert['include_featured_listings'] = bool(alert.get('include_featured_listings', False))
         alert['include_sold_listings'] = bool(alert.get('include_sold_listings', False))
@@ -591,6 +609,7 @@ def api_get_alerts():
 def api_create_alert(alert: dict):
     # initialize fields
     _normalize_alert_cities(alert)
+    _normalize_alert_number_formats(alert)
     print("Create alert city:", alert.get('city', ''))
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     alert['id'] = alert.get('id') or str(uuid.uuid4())
@@ -643,6 +662,7 @@ def api_update_alert(alert_id: str, alert: dict):
             merged_alert['monitoring_interval_seconds'] = int(merged_alert.get('monitoring_interval_seconds') or merged_alert.get('check_interval_seconds') or default_interval)
             merged_alert['check_interval_seconds'] = merged_alert['monitoring_interval_seconds']
             _normalize_alert_cities(merged_alert)
+            _normalize_alert_number_formats(merged_alert)
             if merged_alert.get('send_all_new_plates') or str(merged_alert.get('search_mode', '')).strip().lower() == 'send all new plates' or str(merged_alert.get('name', '')).strip().upper() == 'ALL PLATES':
                 merged_alert['send_all_new_plates'] = True
                 _normalize_alert_cities(merged_alert)

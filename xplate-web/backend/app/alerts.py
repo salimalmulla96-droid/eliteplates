@@ -11,7 +11,7 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .models import Alert, AlertLog, SearchRequest
-from .scraper import search_xplate, price_to_number, city_to_xplate_param
+from .scraper import search_xplate, price_to_number, city_to_xplate_param, match_number_formats, normalize_number_formats, number_format_label
 from .filters import apply_filters, sort_results
 from .storage import get_alerts, save_alert, write_alerts, add_alert_log, get_alert_logs, clear_alert_logs, get_settings
 from . import plate_tracking
@@ -426,8 +426,9 @@ def _rule_summary(alert: Alert) -> str:
         parts.append(f"code {alert.code}")
     if alert.cities:
         parts.append(f"cities {', '.join(alert.cities)}")
-    if alert.number_format and alert.number_format != 'Any format':
-        parts.append(alert.number_format)
+    selected_formats = normalize_number_formats(alert.number_formats, fallback=alert.number_format)
+    if selected_formats:
+        parts.append(', '.join(number_format_label(item) for item in selected_formats))
     if alert.price_max:
         parts.append(f"under AED {alert.price_max}")
     return ', '.join(parts) or alert.name or 'saved alert rule'
@@ -441,6 +442,10 @@ def _match_reason(alert: Alert) -> str:
     if alert.send_all_new_plates:
         return 'Sent because Send every new plate to Telegram is enabled and this listing was published after your baseline.'
     return f"Sent because this listing matched your saved alert rule: {_rule_summary(alert)}."
+
+
+def _format_match_decision(alert: Alert, row: dict[str, Any]) -> dict[str, Any]:
+    return match_number_formats(row.get('plate_number', ''), alert.number_formats, fallback=alert.number_format)
 
 
 def build_telegram_message(alert: Alert, row: dict[str, Any], plate_info: dict[str, Any] | None = None) -> str:
@@ -905,6 +910,7 @@ def _search_rows(alert: Alert) -> list[dict[str, Any]]:
             max_price=alert.price_max,
             cities=alert_cities,
             number_format=alert.number_format,
+            number_formats=alert.number_formats,
             search_depth=search_depth,
             collect_details=collect_details,
             detail_timeout=5,
@@ -930,6 +936,7 @@ def _search_rows(alert: Alert) -> list[dict[str, Any]]:
             max_price=alert.price_max,
             cities=[city] if city else [],
             number_format=alert.number_format,
+            number_formats=alert.number_formats,
             search_depth=search_depth,
             collect_details=collect_details,
             detail_timeout=5,
@@ -949,6 +956,7 @@ def _search_rows(alert: Alert) -> list[dict[str, Any]]:
             starts_with=alert.starts_with,
             ends_with=alert.ends_with,
             number_format=alert.number_format,
+            number_formats=alert.number_formats,
             search_depth='First page only',
             sort='Newest first',
             hide_duplicates=True,
@@ -962,6 +970,8 @@ def _search_rows(alert: Alert) -> list[dict[str, Any]]:
 def initialize_baseline(alert_dict: dict[str, Any]) -> dict[str, Any]:
     alert_dict = _ensure_alert_city_fields(alert_dict)
     alert = Alert(**alert_dict)
+    alert.number_formats = normalize_number_formats(alert.number_formats, fallback=alert.number_format)
+    alert.number_format = number_format_label(alert.number_formats[0]) if alert.number_formats else 'Any format'
     now = datetime.utcnow()
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
     alert.enabled_at = now_str
@@ -1031,6 +1041,8 @@ def initialize_baseline(alert_dict: dict[str, Any]) -> dict[str, Any]:
 def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     alert_dict = _ensure_alert_city_fields(alert_dict)
     alert = Alert(**alert_dict)
+    alert.number_formats = normalize_number_formats(alert.number_formats, fallback=alert.number_format)
+    alert.number_format = number_format_label(alert.number_formats[0]) if alert.number_formats else 'Any format'
     if alert.baseline_created and alert.baseline_completed and not alert.max_seen_listing_id:
         alert.max_seen_listing_id = _derive_max_seen_listing_id(alert)
         alert_dict['max_seen_listing_id'] = alert.max_seen_listing_id
@@ -1154,6 +1166,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
         price_rejects = 0
         sold_rejects = 0
         featured_rejects = 0
+        format_rejects = 0
         city_mismatch_rejects = 0
         city_missing_rejects = 0
         matched_city_count = 0
@@ -1190,6 +1203,16 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                 if price_num is None or price_num > max_price_value:
                     price_rejects += 1
                     continue
+            format_decision = _format_match_decision(alert, row)
+            if not format_decision.get('matched'):
+                format_rejects += 1
+                row_logs.extend([
+                    f"listing: {row.get('city') or '?'} {row.get('code') or '?'} {row.get('plate_number') or '?'}",
+                    f"selected_formats: {', '.join(format_decision.get('selected_format_labels') or [])}",
+                    "format_matched: no",
+                    f"skip_reason: {format_decision.get('skip_reason') or 'number format mismatch'}",
+                ])
+                continue
             final_matches.append(row)
 
         baseline_seen = _get_seen_keys(alert)
@@ -1226,6 +1249,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             posted_text = _posted_when(row)
             recent_posted = is_recent_posted_text(posted_text, fresh_window)
             city_matched, city_skip_reason, alert_city_text, listing_city_text = _city_filter_decision(alert, row)
+            format_decision = _format_match_decision(alert, row)
             would_send = False
             skip_reason = ''
             posted_missing = posted_text in {'', '?', 'Not available', 'Not collected in fast mode'}
@@ -1237,6 +1261,9 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                 f"listing_id: {listing_id or '(missing)'}",
                 f"listing_url: {listing_url or '(missing)'}",
                 f"plate: {row.get('plate_number') or '?'}",
+                f"selected_formats: {', '.join(format_decision.get('selected_format_labels') or []) or 'Any format'}",
+                f"format_matched: {'yes' if format_decision.get('matched') else 'no'}",
+                f"matched_format_name: {format_decision.get('matched_format_name') or '(none)'}",
                 f"city: {row.get('city') or '?'}",
                 f"listing_city: {row.get('city') or '?'}",
                 f"city_matched: {'yes' if city_matched else 'no'}",
@@ -1319,6 +1346,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             f"Skipped city missing: {city_missing_rejects}",
             f"Recent listings: {recent_count}",
             f"Matched filters: {len(final_matches)}",
+            f"Skipped format mismatch: {format_rejects}",
             f"Already sent: {already_notified_rejects}",
             f"Skipped featured: {featured_rejects}",
             f"Skipped sold: {sold_rejects}",
@@ -1363,6 +1391,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             f"Listings skipped city missing: {city_missing_rejects}",
             f"Listings skipped because sold: {sold_rejects}",
             f"Listings skipped because featured/promoted: {featured_rejects}",
+            f"Listings skipped because number format mismatch: {format_rejects}",
             f'Matched by rule: {len(final_matches)}',
             f'New after baseline: {len(to_notify)}',
             f'Skipped because already sent: {already_notified_rejects}',
@@ -1383,6 +1412,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                 recent_posted = is_recent_posted_text(posted_text, fresh_window)
                 id_newer = numeric_listing_id is not None and numeric_listing_id > max_seen_listing_id
                 city_matched, city_skip_reason, alert_city_text, listing_city_text = _city_filter_decision(alert, row)
+                format_decision = _format_match_decision(alert, row)
                 matched = row in final_matches
                 featured_blocked = bool(row.get('featured')) and not bool(alert.include_featured_listings)
                 sold_blocked = bool(row.get('sold')) and not bool(alert.include_sold_listings)
@@ -1393,6 +1423,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                 reason = (
                     'would send' if would_send else
                     city_skip_reason if not city_matched else
+                    (format_decision.get('skip_reason') or 'number format mismatch') if not format_decision.get('matched') else
                     'filter mismatch' if not matched else
                     'already sent' if sent_before else
                     'featured disabled' if featured_blocked else
@@ -1417,6 +1448,11 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                     'featured': bool(row.get('featured')),
                     'sold': bool(row.get('sold')),
                     'matched': matched,
+                    'listing_number': row.get('plate_number') or '?',
+                    'selected_formats': format_decision.get('selected_format_labels') or [],
+                    'format_matched': bool(format_decision.get('matched')),
+                    'format_matched_text': 'yes' if format_decision.get('matched') else 'no',
+                    'matched_format_name': format_decision.get('matched_format_name') or '',
                     'already_sent': bool(sent_before),
                     'already_seen': bool(baseline_seen_before),
                     'recent': bool(recent_posted),
@@ -1445,6 +1481,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
 
         for key, row in to_notify:
             city_matched, city_skip_reason, normalized_alert_city, normalized_listing_city = _city_filter_decision(alert, row)
+            format_decision = _format_match_decision(alert, row)
             send_header_lines = [
                 f"Sending Telegram for alert: {_alert_display_name(alert)}",
                 f"Alert ID: {alert.id or '(missing)'}",
@@ -1465,6 +1502,14 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                     city_mismatch_rejects += 1
                 row_logs.append(f"Final send guard skipped {row.get('city') or '?'} {row.get('code') or '?'} {row.get('plate_number') or '?'}: {city_skip_reason}")
                 send_logs.append(f"Telegram not sent: {city_skip_reason}")
+                continue
+
+            if not format_decision.get('matched'):
+                final_city_guard_skips += 1
+                format_rejects += 1
+                skip_reason = format_decision.get('skip_reason') or 'number format mismatch'
+                row_logs.append(f"Telegram not sent for {row.get('plate_number') or '?'}: {skip_reason}")
+                send_logs.append(f"Telegram not sent: {skip_reason}")
                 continue
 
             if errors:

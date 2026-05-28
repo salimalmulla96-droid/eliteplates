@@ -1,6 +1,14 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _coerce_number_formats(value: Any) -> list[str]:
+    if value is None or value == "Any format":
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip() and str(item) != "Any format"]
+    return [str(value)]
 
 
 class SearchRequest(BaseModel):
@@ -15,11 +23,17 @@ class SearchRequest(BaseModel):
     starts_with: str = ""
     ends_with: str = ""
     number_format: str = "Any format"
+    number_formats: list[str] = Field(default_factory=list)
     search_depth: str = "All pages"
     sort: str = "Newest first"
     hide_duplicates: bool = True
     show_seller_details: bool = True
     price_position: str = "Any price"
+
+    @field_validator("number_formats", mode="before")
+    @classmethod
+    def coerce_number_formats(cls, value):
+        return _coerce_number_formats(value)
 
 
 class HistoryRunRequest(BaseModel):
@@ -61,6 +75,7 @@ class AlertBase(BaseModel):
     starts_with: str = ""
     ends_with: str = ""
     number_format: str = "Any format"
+    number_formats: list[str] = Field(default_factory=list)
     check_interval_minutes: int = 10
     check_interval_seconds: int = 20
     monitoring_interval_seconds: int = 20
@@ -99,6 +114,11 @@ class AlertBase(BaseModel):
     enabled_at: str = ""
     baseline_completed: bool = False
     seen_listing_keys: list[str] = Field(default_factory=list)
+
+    @field_validator("number_formats", mode="before")
+    @classmethod
+    def coerce_number_formats(cls, value):
+        return _coerce_number_formats(value)
 
 
 class AlertCreate(AlertBase):

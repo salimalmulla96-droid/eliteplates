@@ -99,6 +99,7 @@ def save_search(search: dict[str, Any], result_count: int) -> dict[str, Any]:
         "starts_with",
         "ends_with",
         "number_format",
+        "number_formats",
         "search_depth",
         "sort",
         "hide_duplicates",

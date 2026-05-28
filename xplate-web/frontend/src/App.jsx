@@ -26,6 +26,7 @@ const defaultForm = {
   starts_with: '',
   ends_with: '',
   number_format: 'Any format',
+  number_formats: [],
   search_depth: 'All pages',
   sort: 'Newest first',
   hide_duplicates: true,
