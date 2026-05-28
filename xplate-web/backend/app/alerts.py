@@ -13,13 +13,16 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .models import Alert, AlertLog, SearchRequest
 from .scraper import search_xplate, price_to_number, city_to_xplate_param, match_number_formats, normalize_number_formats, number_format_label
 from .filters import apply_filters, sort_results
-from .storage import get_alerts, save_alert, write_alerts, add_alert_log, get_alert_logs, clear_alert_logs, get_settings
+from .storage import DATA_DIR, ALERTS_PATH, get_alerts, save_alert, write_alerts, add_alert_log, get_alert_logs, clear_alert_logs, get_settings
 from . import plate_tracking
 from .alert_config import get_config
 
 RUNNING_ALERTS: dict[str, bool] = {}
 DISABLED_SKIP_LOGGED: set[str] = set()
 SCHEDULER: BackgroundScheduler | None = None
+LAST_SCAN_TIME = ''
+STOP_ALL_ALERTS_ACTIVE = False
+STOP_ALL_REQUESTED_AT = ''
 AUTO_MAX_PAGES_PER_SCAN = 20
 AUTO_MAX_LISTINGS_PER_SCAN = 1000
 AUTO_FRESH_LISTING_WINDOW_MINUTES = 15
@@ -712,6 +715,22 @@ def send_telegram_plate_alert(bot_token: str, chat_id: str, alert: Alert, listin
     print("Alert ID:", alert.id or '(missing)')
     print("Alert city:", _alert_city_log_value(alert))
     print("Listing city:", listing.get('city') or '?')
+    if stop_all_active():
+        print("Telegram skipped: emergency stop-all is active")
+        return {
+            'sent': False,
+            'skipped': True,
+            'skip_reason': 'Emergency stop-all is active',
+            'telegram_response': {},
+        }
+    if alert.id and not _storage_alert_enabled(str(alert.id)):
+        print("Telegram skipped: alert is disabled or missing in storage")
+        return {
+            'sent': False,
+            'skipped': True,
+            'skip_reason': 'Alert is disabled or missing in storage',
+            'telegram_response': {},
+        }
     city_matched, skip_reason, normalized_alert_city, normalized_listing_city = _city_filter_decision(alert, listing)
     if not city_matched:
         print("Telegram skipped by final city guard:", skip_reason or 'City mismatch')
@@ -857,6 +876,44 @@ def _get_seen_keys(alert: Alert) -> set[str]:
 
 def _get_sent_keys(alert: Alert) -> set[str]:
     return set(getattr(alert, 'sent_listing_keys', []) or [])
+
+
+def clear_scheduler_cache() -> None:
+    RUNNING_ALERTS.clear()
+    DISABLED_SKIP_LOGGED.clear()
+
+
+def request_stop_all(disabled_count: int) -> None:
+    global STOP_ALL_ALERTS_ACTIVE, STOP_ALL_REQUESTED_AT
+    STOP_ALL_ALERTS_ACTIVE = True
+    STOP_ALL_REQUESTED_AT = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    clear_scheduler_cache()
+    print(f"STOP ALL ALERTS: disabled {disabled_count} alerts and cleared scheduler cache")
+
+
+def clear_stop_all() -> None:
+    global STOP_ALL_ALERTS_ACTIVE
+    STOP_ALL_ALERTS_ACTIVE = False
+
+
+def stop_all_active() -> bool:
+    return STOP_ALL_ALERTS_ACTIVE
+
+
+def scheduler_running() -> bool:
+    return bool(SCHEDULER and SCHEDULER.running)
+
+
+def active_alert_ids() -> list[str]:
+    return [str(alert_id) for alert_id, running in RUNNING_ALERTS.items() if running]
+
+
+def _storage_alert_enabled(alert_id: str) -> bool:
+    alerts = get_alerts()
+    if not alerts:
+        return False
+    current = next((item for item in alerts if str(item.get('id') or '') == str(alert_id or '')), None)
+    return bool(current and _is_enabled_value(current.get('enabled')))
 
 
 def _mark_listing_key(target: set[str], row: dict[str, Any]) -> None:
@@ -1043,14 +1100,57 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
     alert = Alert(**alert_dict)
     alert.number_formats = normalize_number_formats(alert.number_formats, fallback=alert.number_format)
     alert.number_format = number_format_label(alert.number_formats[0]) if alert.number_formats else 'Any format'
+    alert_id = alert.id or str(uuid.uuid4())
     if alert.baseline_created and alert.baseline_completed and not alert.max_seen_listing_id:
         alert.max_seen_listing_id = _derive_max_seen_listing_id(alert)
         alert_dict['max_seen_listing_id'] = alert.max_seen_listing_id
-        save_alert(alert.model_dump())
-    alert_id = alert.id or str(uuid.uuid4())
+        if dry_run or _storage_alert_enabled(str(alert_id)):
+            save_alert(alert.model_dump())
     now = datetime.utcnow()
     matches: list[dict[str, Any]] = []
     try:
+        if not dry_run and (stop_all_active() or not _storage_alert_enabled(str(alert.id or ''))):
+            checked_at = now.strftime('%Y-%m-%d %H:%M:%S')
+            reason = 'Emergency stop-all is active.' if stop_all_active() else 'Alert is disabled or missing in storage.'
+            add_alert_log(AlertLog(
+                id=str(uuid.uuid4()),
+                alert_id=alert_id,
+                alert_name=alert.name,
+                checked_at=checked_at,
+                status='stopped',
+                event_type='Skipped',
+                severity='warning',
+                message=f"Stopped alert rule before scan: {_alert_display_name(alert)}. No Telegram send.",
+                matches_count=0,
+                sent_notifications=0,
+                error='',
+                listing={},
+                reason=reason,
+                details=[
+                    *_alert_identity_lines(alert),
+                    reason,
+                    'No scan performed.',
+                    'No Telegram messages sent.',
+                ],
+            ).model_dump())
+            return {
+                'ok': True,
+                'total_scraped': 0,
+                'scraped': 0,
+                'matched': 0,
+                'new_after_baseline': 0,
+                'skipped_baseline': 0,
+                'eligible_to_send': 0,
+                'sent': 0,
+                'failed': 0,
+                'skipped_old': 0,
+                'skipped_featured': 0,
+                'skipped_city_mismatch': 0,
+                'skipped_duplicate': 0,
+                'telegram_ready': False,
+                'telegram_attempts': 0,
+                'message': f'Stopped: {reason}',
+            }
         if not alert.enabled:
             checked_at = now.strftime('%Y-%m-%d %H:%M:%S')
             add_alert_log(AlertLog(
@@ -1480,6 +1580,10 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
         }
 
         for key, row in to_notify:
+            if stop_all_active() or not _storage_alert_enabled(str(alert.id or '')):
+                row_logs.append('Telegram send aborted: emergency stop-all active, or alert is disabled/missing in storage.')
+                send_logs.append('Telegram send aborted before API request.')
+                break
             city_matched, city_skip_reason, normalized_alert_city, normalized_listing_city = _city_filter_decision(alert, row)
             format_decision = _format_match_decision(alert, row)
             send_header_lines = [
@@ -1530,6 +1634,10 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                 telegram_attempts += 1
                 row_logs.append(f"Sending Telegram for {plate_number}")
                 send_logs.append(f"Telegram send attempted for {plate_number}")
+                if stop_all_active() or not _storage_alert_enabled(str(alert.id or '')):
+                    row_logs.append('Telegram send cancelled immediately before API request.')
+                    send_logs.append('Telegram send cancelled immediately before API request.')
+                    break
                 send_result = send_telegram_plate_alert(bot_token, chat_id, alert, row)
                 if send_result.get('skipped'):
                     final_city_guard_skips += 1
@@ -1597,7 +1705,11 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
         alert.max_seen_listing_id = max_seen_listing_id
         alert.updated_at = now.strftime('%Y-%m-%d %H:%M:%S')
 
-        save_alert(alert.model_dump())
+        if stop_all_active() or not _storage_alert_enabled(str(alert.id or alert_id)):
+            row_logs.append('Alert state not saved because emergency stop-all is active or the alert is disabled/missing in storage.')
+            send_logs.append('Scheduler cache/storage guard prevented stale alert state from being re-saved.')
+        else:
+            save_alert(alert.model_dump())
 
         summary_lines = [
             f"Alert ID: {alert.id or '(missing)'}",
@@ -1743,10 +1855,33 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
 
 
 def _check_due_alerts():
+    global LAST_SCAN_TIME
     alerts = get_alerts()
     now = datetime.utcnow()
+    LAST_SCAN_TIME = now.strftime('%Y-%m-%d %H:%M:%S')
+    if stop_all_active():
+        clear_scheduler_cache()
+        print("Alert scheduler scan skipped: emergency stop-all is active. No Telegram sends will run.")
+        return
+    if not alerts:
+        clear_scheduler_cache()
+        print("Alert scheduler scan: no alerts found in storage. No Telegram sends will run.")
+        return
+    enabled_alerts = [a for a in alerts if _is_enabled_value(a.get('enabled'))]
+    active_ids = [str(a.get('id') or '') for a in enabled_alerts]
+    active_names = [str(a.get('name') or a.get('id') or '(unnamed)') for a in enabled_alerts]
+    active_cities = [
+        str(a.get('cities') or a.get('city') or 'All cities')
+        for a in enabled_alerts
+    ]
+    print(f"Alerts loaded count: {len(alerts)}")
+    print(f"Enabled alerts count: {len(enabled_alerts)}")
+    print(f"Alert scheduler scan active alert IDs: {', '.join(active_ids) if active_ids else '(none)'}")
+    print(f"Active alert names: {', '.join(active_names) if active_names else '(none)'}")
+    print(f"Active alert cities: {', '.join(active_cities) if active_cities else '(none)'}")
     for a in alerts:
         try:
+            print(f"Alert scheduler scan rule: id={a.get('id') or '(missing)'} name={a.get('name') or '(unnamed)'} cities={a.get('cities') or a.get('city') or 'All cities'} enabled={'yes' if _is_enabled_value(a.get('enabled')) else 'no'}")
             if not _is_enabled_value(a.get('enabled')):
                 alert_id = str(a.get('id') or '').strip()
                 if alert_id and alert_id not in DISABLED_SKIP_LOGGED:
@@ -1792,7 +1927,10 @@ def _check_due_alerts():
                 try:
                     check_alert(a)
                 finally:
-                    RUNNING_ALERTS[a.get('id')] = False
+                    if stop_all_active():
+                        RUNNING_ALERTS.pop(a.get('id'), None)
+                    else:
+                        RUNNING_ALERTS[a.get('id')] = False
         except Exception:
             continue
 
@@ -1801,9 +1939,18 @@ def start_scheduler():
     global SCHEDULER
     if SCHEDULER is not None:
         return SCHEDULER
+    alerts = get_alerts()
+    settings = get_settings()
+    telegram_configured = bool(str(settings.get('telegram_bot_token', '') or '').strip() and normalize_telegram_channel_id(settings.get('telegram_chat_id', '') or settings.get('telegram_channel_id', '')))
+    print(f"Alert storage path: {ALERTS_PATH}")
+    print(f"Alert data directory: {DATA_DIR}")
+    print(f"Alerts loaded count: {len(alerts)}")
+    print(f"Enabled alerts count: {len([alert for alert in alerts if _is_enabled_value(alert.get('enabled'))])}")
+    print(f"Telegram configured: {'yes' if telegram_configured else 'no'}")
     SCHEDULER = BackgroundScheduler()
     SCHEDULER.add_job(_check_due_alerts, 'interval', seconds=10, id='alerts_checker')
     SCHEDULER.start()
+    print(f"Scheduler started: {'yes' if SCHEDULER.running else 'no'}")
     return SCHEDULER
 
 

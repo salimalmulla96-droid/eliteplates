@@ -30,12 +30,14 @@ import {
   toggleAlert,
   disableOtherAlerts,
   testTelegram,
+  testTelegramChannel,
   runAlertNow,
   debugAlertScan,
   forceSendTestListing,
   resetAlertBaseline,
   getAlertLogs,
   clearAlertLogs,
+  stopAllAlerts,
 } from '../api'
 import CityMultiSelect from './CityMultiSelect'
 import { CODE_OPTIONS, NUMBER_FORMAT_OPTIONS, SEARCH_MODE_OPTIONS, ALERT_INTERVAL_OPTIONS } from '../constants/options'
@@ -326,6 +328,13 @@ function seenCount(alert) {
   return new Set([...(alert.seen_listing_keys || []), ...(alert.seen_listing_ids || []), ...(alert.seen_listing_urls || [])]).size
 }
 
+function normalizeAlertsResponse(data) {
+  const alertsList = Array.isArray(data) ? data : data?.alerts || []
+  console.log("GET /api/alerts raw:", data)
+  console.log("Normalized alerts:", alertsList)
+  return Array.isArray(alertsList) ? alertsList : []
+}
+
 function Card({ title, helper, icon: Icon, action, children, className = '' }) {
   return (
     <section className={`rounded-[26px] bg-slate-950/55 p-5 shadow-xl shadow-black/10 ${className}`}>
@@ -426,7 +435,7 @@ function DetailPanel({ listing, log }) {
 
 export default function Alerts({ options = {} }) {
   const [activeTab, setActiveTab] = useState('Alert Rules')
-  const [alerts, setAlerts] = useState([])
+  const [alertsList, setAlertsList] = useState([])
   const [logs, setLogs] = useState([])
   const [settings, setSettings] = useState({})
   const [form, setForm] = useState(DEFAULT_ALERT)
@@ -466,7 +475,7 @@ export default function Alerts({ options = {} }) {
 
   const normalizedChannelPreview = normalizeTelegramChannel(settings.telegram_chat_id || settings.telegram_channel_id || '')
   const telegramConfigured = Boolean(settings.telegram_bot_token && normalizedChannelPreview)
-  const enabledAlertList = alerts.filter(isAlertEnabled)
+  const enabledAlertList = alertsList.filter(isAlertEnabled)
   const enabledRules = enabledAlertList.length
   const multipleAlertsEnabled = enabledRules > 1
   const selectedIntervalSeconds = Number(form.monitoring_interval_seconds || form.check_interval_seconds || (Number(form.check_interval_minutes || 1) * 60) || 20)
@@ -522,15 +531,19 @@ export default function Alerts({ options = {} }) {
   async function loadAll() {
     try {
       const [alertResponse, logResponse, settingsResponse, instagramResponse] = await Promise.all([getAlerts(), getAlertLogs(), api.settings(), api.getInstagramSettings()])
-      setAlerts(alertResponse.alerts || [])
+      const alertsList = normalizeAlertsResponse(alertResponse)
+      console.log("Reloaded alerts:", alertsList)
+      setAlertsList(alertsList)
       setLogs(logResponse.logs || [])
       setSettings(settingsResponse.settings || {})
       const nextInstagramSettings = { ...DEFAULT_INSTAGRAM_SETTINGS, ...(instagramResponse.settings || {}) }
       setInstagramSettings(nextInstagramSettings)
       setInstagramAccountsText((nextInstagramSettings.accounts || []).map((account) => account.username || account).join('\n'))
       setInstagramDirty(false)
+      return alertsList
     } catch {
       setMessage('Failed to load alerts and logs.')
+      return []
     }
   }
 
@@ -779,10 +792,10 @@ export default function Alerts({ options = {} }) {
     return ''
   }
 
-  function resetForm() {
+  function resetForm({ clearMessage = true } = {}) {
     setForm(DEFAULT_ALERT)
     setEditing(null)
-    setMessage('')
+    if (clearMessage) setMessage('')
     setFormatMenuOpen(false)
     setFormatQuery('')
   }
@@ -816,14 +829,17 @@ export default function Alerts({ options = {} }) {
         monitoring_interval_seconds: selectedIntervalSeconds,
         check_interval_seconds: selectedIntervalSeconds,
       }
+      console.log("Creating alert payload:", payload)
       if (editing) {
-        const response = await updateAlert(editing, payload)
-        setMessage(response.message || 'Alert updated successfully.')
+        const createResponse = await updateAlert(editing, payload)
+        console.log("Create alert response:", createResponse)
+        setMessage(createResponse.message || 'Alert updated successfully.')
       } else {
-        const response = await createAlert(payload)
-        setMessage(response.message || 'Alert created. Future matching plates will be sent automatically.')
+        const createResponse = await createAlert(payload)
+        console.log("Create alert response:", createResponse)
+        setMessage(createResponse.message || 'Alert created. Future matching plates will be sent automatically.')
       }
-      resetForm()
+      resetForm({ clearMessage: false })
       await loadAll()
     } catch (error) {
       setMessage(error?.message || 'Failed to save alert.')
@@ -896,6 +912,22 @@ export default function Alerts({ options = {} }) {
     withWorking(alert, () => testTelegram(alert.id), (response) => response.message || 'Test message sent to Telegram channel.', 'test')
   }
 
+  async function handleTestChannelAlert() {
+    setWorkingAction('test-channel')
+    setMessage('')
+    try {
+      const response = await testTelegramChannel({
+        telegram_bot_token: settings.telegram_bot_token || '',
+        telegram_chat_id: settings.telegram_chat_id || settings.telegram_channel_id || '',
+      })
+      setMessage(response.message || 'Test message sent to Telegram channel.')
+    } catch (error) {
+      setMessage(error?.message || 'Telegram channel test failed.')
+    } finally {
+      setWorkingAction('')
+    }
+  }
+
   function handleDisableOthers(alert) {
     withWorking(alert, () => disableOtherAlerts(alert.id), (response) => response.message || 'Other alerts disabled.', 'safety')
   }
@@ -928,13 +960,27 @@ export default function Alerts({ options = {} }) {
     }
   }
 
+  async function handleStopAllAlerts() {
+    setWorkingAction('stop-all')
+    setMessage('')
+    try {
+      const response = await stopAllAlerts()
+      setMessage(response.message || 'Emergency stop complete. All alerts disabled.')
+      await loadAll()
+    } catch (error) {
+      setMessage(error?.message || 'Failed to stop alerts.')
+    } finally {
+      setWorkingAction('')
+    }
+  }
+
   function showLogDetails(log) {
     setExpandedLog(expandedLog === log.id ? null : log.id)
     setSelectedLog(log)
     if (log.listing && Object.keys(log.listing).length) setSelectedListing(log.listing)
   }
 
-  const testTarget = editing ? { id: editing } : alerts[0]
+  const testTarget = editing ? (alertsList.find((alert) => alert.id === editing) || { id: editing }) : alertsList[0]
   const monitoringSpeedCard = (
     <Card title="Monitoring Speed" helper="Choose how often this alert checks for new matching listings." icon={Gauge}>
       <div className="grid gap-3 grid-cols-3 md:grid-cols-6 2xl:grid-cols-3">
@@ -970,18 +1016,24 @@ export default function Alerts({ options = {} }) {
   )
 
   const savedRulesCard = (
-    <Card title="Saved Rules" helper="Compact monitoring status for each alert rule." icon={FileText} className="h-fit">
+    <Card
+      title="Saved Rules"
+      helper="Compact monitoring status for each alert rule."
+      icon={FileText}
+      className="h-fit"
+      action={<button className="btn-danger" onClick={handleStopAllAlerts} disabled={!alertsList.length || workingAction === 'stop-all'}><AlertTriangle size={14} /> {workingAction === 'stop-all' ? 'Stopping...' : 'Stop all'}</button>}
+    >
       <div className="space-y-3">
         {multipleAlertsEnabled && (
           <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 p-4 text-sm font-bold text-amber-100">
             Multiple alerts are enabled. Plates may be sent from more than one rule.
           </div>
         )}
-        {alerts.length === 0 ? (
+        {alertsList.length === 0 ? (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5 text-sm leading-6 text-slate-400">
             No alert rules yet. Create your first alert to start monitoring.
           </div>
-        ) : alerts.map((alert) => {
+        ) : alertsList.map((alert) => {
           const ready = Boolean((alert.telegram_bot_token || settings.telegram_bot_token) && (alert.telegram_chat_id || settings.telegram_chat_id || settings.telegram_channel_id))
           const enabled = isAlertEnabled(alert)
           const badgeLabel = !ready ? 'Telegram not ready' : enabled ? 'Enabled' : 'Disabled'
@@ -1222,7 +1274,8 @@ export default function Alerts({ options = {} }) {
                 <div className="mt-5 flex flex-wrap gap-3">
                   <button className="btn-primary" onClick={saveTelegramSettings}>Save Telegram settings</button>
                   <button className="btn-muted" onClick={verifyTelegramConnection} disabled={verifyingTelegram}>{verifyingTelegram ? 'Verifying...' : 'Verify Telegram connection'}</button>
-                  <button className="btn-muted" onClick={() => testTarget ? handleTestTelegram(testTarget) : setMessage('Create or select an alert before sending a test.')} disabled={workingAction === 'test'}>{workingAction === 'test' ? 'Sending test...' : 'Test Channel Alert'}</button>
+                  <button className="btn-muted" onClick={handleTestChannelAlert} disabled={workingAction === 'test-channel'}>{workingAction === 'test-channel' ? 'Sending test...' : 'Test Channel Alert'}</button>
+                  <button className="btn-muted" onClick={() => testTarget ? handleTestTelegram(testTarget) : setMessage('Create or select an alert before sending a test.')} disabled={workingAction === 'test'}>{workingAction === 'test' ? 'Sending rule test...' : 'Test Alert Rule'}</button>
                 </div>
               </Card>
               <div className="grid gap-6 lg:grid-cols-2">
@@ -1232,7 +1285,7 @@ export default function Alerts({ options = {} }) {
                       ['Bot token saved', Boolean(settings.telegram_bot_token)],
                       ['Channel ID saved', Boolean(normalizedChannelPreview)],
                       ['Connection verified', telegramVerification?.ok === true],
-                      ['Test target available', Boolean(testTarget)],
+                      ['Alert rule test available', Boolean(testTarget)],
                     ].map(([label, ok]) => (
                       <div key={label} className="flex items-center justify-between rounded-2xl bg-slate-900/70 p-3">
                         <span className="text-slate-300">{label}</span>

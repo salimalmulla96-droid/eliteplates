@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any, Optional
 import logging
 
+from .storage import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 # Path to the database
-DB_PATH = Path(__file__).parent.parent.parent / 'plate_tracking.db'
+DB_PATH = DATA_DIR / 'plate_tracking.db'
 
 
 def init_db():

@@ -64,6 +64,7 @@ export const api = {
   settings: () => request('/api/settings'),
   saveSettings: (settings) => request('/api/settings', { method: 'POST', body: JSON.stringify({ settings }) }),
   verifyTelegram: (body) => request('/api/telegram/verify', { method: 'POST', body: JSON.stringify(body) }),
+  testTelegramChannel: (body) => request('/api/telegram/test-channel', { method: 'POST', body: JSON.stringify(body || {}) }),
   getInstagramSettings: () => request('/api/instagram/settings'),
   saveInstagramSettings: (settings) => request('/api/instagram/settings', { method: 'POST', body: JSON.stringify({ settings }) }),
   verifyInstagramProvider: (settings) => request('/api/instagram/verify-provider', { method: 'POST', body: JSON.stringify({ settings }) }),
@@ -123,6 +124,10 @@ export async function testTelegram(alertId) {
   return request(`/api/alerts/${encodeURIComponent(alertId)}/test-telegram`, { method: 'POST' })
 }
 
+export async function testTelegramChannel(payload = {}) {
+  return request('/api/telegram/test-channel', { method: 'POST', body: JSON.stringify(payload) })
+}
+
 export async function previewAlertTelegram(payload) {
   return request('/api/alerts/preview', { method: 'POST', body: JSON.stringify(payload) })
 }
@@ -149,4 +154,12 @@ export async function getAlertLogs() {
 
 export async function clearAlertLogs() {
   return request('/api/alerts/logs', { method: 'DELETE' })
+}
+
+export async function stopAllAlerts() {
+  return request('/api/alerts/stop-all', { method: 'POST' })
+}
+
+export async function clearAllAlerts() {
+  return request('/api/alerts/clear-all', { method: 'DELETE' })
 }

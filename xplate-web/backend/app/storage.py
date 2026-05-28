@@ -1,12 +1,13 @@
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path(os.getenv("DATA_DIR") or Path(__file__).resolve().parents[1] / "data").resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 HISTORY_PATH = DATA_DIR / "search_history.json"
 FAVORITES_PATH = DATA_DIR / "favorites.json"

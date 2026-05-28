@@ -38,6 +38,8 @@ from .scraper import (
     sort_results,
 )
 from .storage import (
+    DATA_DIR,
+    ALERTS_PATH,
     clear_favorites,
     clear_history,
     delete_favorite,
@@ -522,6 +524,31 @@ def telegram_verify(payload: dict):
         return result
 
 
+@app.post("/api/telegram/test-channel")
+def telegram_test_channel(payload: dict | None = None):
+    payload = payload or {}
+    settings = get_settings()
+    bot_token = str(payload.get("telegram_bot_token") or settings.get("telegram_bot_token", "") or "").strip()
+    chat_id = alerts_module.normalize_telegram_channel_id(payload.get("telegram_chat_id") or settings.get("telegram_chat_id", "") or settings.get("telegram_channel_id", ""))
+    if not bot_token:
+        return JSONResponse(status_code=400, content={"ok": False, "message": "Telegram bot token missing"})
+    if not chat_id:
+        return JSONResponse(status_code=400, content={"ok": False, "message": "Telegram channel ID missing"})
+    try:
+        sent_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = f"<b>Xplate Telegram test</b>\nChannel test sent at {html.escape(sent_at, quote=False)}."
+        response = alerts_module.send_telegram_message(bot_token, chat_id, message)
+        return {
+            "ok": True,
+            "message": "Test message sent to Telegram channel.",
+            "normalized_channel_id": chat_id,
+            "telegram_response": response,
+        }
+    except Exception as exc:
+        error_message = alerts_module.user_friendly_telegram_error(str(exc))
+        return JSONResponse(status_code=400, content={"ok": False, "message": error_message, "raw_error": str(exc)})
+
+
 @app.get("/api/debug")
 def debug():
     return {"lines": LATEST_DEBUG}
@@ -645,7 +672,16 @@ def api_create_alert(alert: dict):
     alert['sent_today'] = int(alert.get('sent_today') or 0)
     save_alert(alert)
     baseline = alerts_module.initialize_baseline(alert)
-    return {'alert': baseline, 'message': 'Alert created. Future matching plates will be sent automatically.'}
+    if _is_alert_enabled(baseline):
+        alerts_module.clear_stop_all()
+    alerts_module.clear_scheduler_cache()
+    saved_alerts = get_alerts()
+    print(f"Create alert saved alert id: {baseline.get('id') or alert.get('id') or '(missing)'}")
+    print(f"Create alert saved alert name: {baseline.get('name') or alert.get('name') or '(unnamed)'}")
+    print(f"Create alert saved city/cities: {baseline.get('cities') or baseline.get('city') or alert.get('cities') or alert.get('city') or 'All cities'}")
+    print(f"Create alert storage path: {ALERTS_PATH}")
+    print(f"Create alert total alerts count after saving: {len(saved_alerts)}")
+    return {'alert': baseline, 'alerts': saved_alerts, 'message': 'Alert created. Future matching plates will be sent automatically.'}
 
 
 @app.put('/api/alerts/{alert_id}')
@@ -679,14 +715,53 @@ def api_update_alert(alert_id: str, alert: dict):
     if not found:
         raise HTTPException(status_code=404, detail='Alert not found')
     write_alerts(alerts)
+    if _is_alert_enabled(merged_alert):
+        alerts_module.clear_stop_all()
+    alerts_module.clear_scheduler_cache()
     return {'alert': merged_alert}
+
+
+@app.delete('/api/alerts/clear-all')
+def api_clear_all_alerts():
+    alerts = get_alerts()
+    removed_ids = [str(alert.get('id') or '') for alert in alerts if alert.get('id')]
+    write_alerts([])
+    alerts_module.request_stop_all(len(alerts))
+    message = f"Cleared {len(alerts)} alert rule(s) from storage and cleared scheduler cache."
+    add_alert_log({
+        'id': str(uuid.uuid4()),
+        'alert_id': 'clear-all',
+        'alert_name': 'Clear all alerts',
+        'checked_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'status': 'all_cleared',
+        'event_type': 'Skipped',
+        'severity': 'warning',
+        'message': message,
+        'matches_count': 0,
+        'sent_notifications': 0,
+        'error': '',
+        'listing': {},
+        'reason': 'DELETE /api/alerts/clear-all called.',
+        'details': [
+            f"Removed alert IDs: {', '.join(removed_ids) if removed_ids else '(none)'}",
+            'Alerts storage is now empty.',
+            'Scheduler cache cleared.',
+            'No Telegram messages will be sent until a new alert is created.',
+        ],
+    })
+    return {
+        'ok': True,
+        'alerts': [],
+        'removed_alert_ids': removed_ids,
+        'enabled_count': 0,
+        'message': message,
+    }
 
 
 @app.delete('/api/alerts/{alert_id}')
 def api_delete_alert(alert_id: str):
     delete_alert(alert_id)
-    alerts_module.RUNNING_ALERTS.pop(alert_id, None)
-    alerts_module.DISABLED_SKIP_LOGGED.discard(alert_id)
+    alerts_module.clear_scheduler_cache()
     return {'ok': True}
 
 
@@ -696,9 +771,11 @@ def api_toggle_alert(alert_id: str):
     for a in alerts:
         if a.get('id') == alert_id:
             enabling = not _is_alert_enabled(a)
+            alerts_module.clear_scheduler_cache()
             a['enabled'] = enabling
             a['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             if enabling:
+                alerts_module.clear_stop_all()
                 a['baseline_completed'] = False
                 a['baseline_created'] = False
                 a['seen_listing_keys'] = []
@@ -712,6 +789,48 @@ def api_toggle_alert(alert_id: str):
                 return {'alert': a, 'message': 'Baseline created. Future listings only.'}
             return {'alert': a}
     raise HTTPException(status_code=404, detail='Alert not found')
+
+
+@app.post('/api/alerts/stop-all')
+def api_stop_all_alerts():
+    alerts = get_alerts()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    disabled_ids: list[str] = []
+    for alert in alerts:
+        if _is_alert_enabled(alert):
+            disabled_ids.append(str(alert.get('id') or ''))
+        alert['enabled'] = False
+        alert['updated_at'] = now
+    write_alerts(alerts)
+    alerts_module.request_stop_all(len(disabled_ids))
+    stop_message = f"STOP ALL ALERTS: disabled {len(disabled_ids)} alerts and cleared scheduler cache"
+    add_alert_log({
+        'id': str(uuid.uuid4()),
+        'alert_id': 'stop-all',
+        'alert_name': 'Emergency stop all',
+        'checked_at': now,
+        'status': 'all_disabled',
+        'event_type': 'Skipped',
+        'severity': 'warning',
+        'message': stop_message,
+        'matches_count': 0,
+        'sent_notifications': 0,
+        'error': '',
+        'listing': {},
+        'reason': 'Emergency stop-all endpoint called.',
+        'details': [
+            f"Disabled alert IDs: {', '.join(disabled_ids) if disabled_ids else '(none)'}",
+            'Scheduler cache cleared.',
+            'Future Telegram sends are stopped until alerts are re-enabled.',
+        ],
+    })
+    return {
+        'ok': True,
+        'alerts': alerts,
+        'disabled_alert_ids': disabled_ids,
+        'enabled_count': 0,
+        'message': stop_message,
+    }
 
 
 @app.post('/api/alerts/{alert_id}/disable-others')
@@ -733,6 +852,7 @@ def api_disable_other_alerts(alert_id: str):
             alerts_module.RUNNING_ALERTS.pop(str(alert.get('id') or ''), None)
 
     write_alerts(alerts)
+    alerts_module.clear_scheduler_cache()
     enabled_alerts = [alert for alert in alerts if _is_alert_enabled(alert)]
     add_alert_log({
         'id': str(uuid.uuid4()),
@@ -1023,8 +1143,9 @@ def api_force_test_listing(alert_id: str):
     bot_token = str(alert.get('telegram_bot_token', '') or get_settings().get('telegram_bot_token', '') or '').strip()
     chat_id = alerts_module.normalize_telegram_channel_id(alert.get('telegram_chat_id', '') or get_settings().get('telegram_chat_id', ''))
     checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    alert_cities = _normalize_alert_cities(alert)
     sample_row = {
-        'city': 'Dubai',
+        'city': alert_cities[0] if alert_cities else 'Sample City',
         'code': 'A',
         'plate_number': '89898',
         'price': 'AED 40,000',
@@ -1160,6 +1281,7 @@ def api_reset_alert_baseline(alert_id: str):
     if not alert:
         raise HTTPException(status_code=404, detail='Alert not found')
     reset_result = alerts_module.initialize_baseline(alert)
+    alerts_module.clear_scheduler_cache()
     return {'alert': reset_result, 'message': 'Baseline reset. Future listings only.'}
 
 
@@ -1172,7 +1294,7 @@ def api_get_alert_logs():
 def api_alert_preview(alert: dict):
     cities = _normalize_alert_cities(alert)
     sample_row = {
-        'city': cities[0] if cities else 'Dubai',
+        'city': cities[0] if cities else 'Sample City',
         'code': alert.get('code') or 'A',
         'plate_number': alert.get('plate_number') or alert.get('contains') or '89898',
         'price': alert.get('price_max') and f"AED {alert.get('price_max')}" or 'AED 40,000',
@@ -1246,6 +1368,32 @@ def api_debug_instagram_ocr():
     if not result.get('ok'):
         raise HTTPException(status_code=400, detail=result.get('message') or 'Instagram OCR debug unavailable')
     return result
+
+
+@app.get('/api/production/status')
+def api_production_status():
+    alerts = get_alerts()
+    enabled_alerts = [alert for alert in alerts if _is_alert_enabled(alert)]
+    settings_data = get_settings()
+    telegram_configured = bool(
+        str(settings_data.get('telegram_bot_token', '') or '').strip()
+        and alerts_module.normalize_telegram_channel_id(settings_data.get('telegram_chat_id', '') or settings_data.get('telegram_channel_id', ''))
+    )
+    last_scan_time = alerts_module.LAST_SCAN_TIME or max(
+        (str(alert.get('last_scan_at') or alert.get('last_checked_at') or '') for alert in alerts),
+        default='',
+    )
+    return {
+        'backend': 'running',
+        'storage_path': str(ALERTS_PATH),
+        'data_dir': str(DATA_DIR),
+        'alerts_count': len(alerts),
+        'enabled_alerts': len(enabled_alerts),
+        'scheduler_running': alerts_module.scheduler_running(),
+        'telegram_configured': telegram_configured,
+        'last_scan_time': last_scan_time,
+        'active_alert_ids': alerts_module.active_alert_ids(),
+    }
 
 
 @app.on_event('startup')
