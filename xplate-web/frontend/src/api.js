@@ -31,7 +31,7 @@ async function request(path, options = {}) {
   } catch (error) {
     // Network errors (CORS, connection refused, etc.)
     if (error instanceof TypeError && error.message.includes('fetch')) {
-      const connectionError = new Error('Backend connection failed. Make sure FastAPI is running on http://127.0.0.1:8000.')
+      const connectionError = new Error(`Backend connection failed. Could not connect to ${API_BASE_URL}.`)
       connectionError.isConnectionError = true
       if (errorNotificationCallback) {
         errorNotificationCallback(connectionError.message)
