@@ -17,6 +17,11 @@ ALERTS_PATH = DATA_DIR / "alerts.json"
 ALERT_LOGS_PATH = DATA_DIR / "alert_logs.json"
 INSTAGRAM_SETTINGS_PATH = DATA_DIR / "instagram_settings.json"
 INSTAGRAM_SEEN_POSTS_PATH = DATA_DIR / "instagram_seen_posts.json"
+ALERT_CONFIG_PATH = DATA_DIR / "alert_config.json"
+
+MAX_ALERT_LOGS = int(os.getenv("MAX_ALERT_LOGS", "1000") or 1000)
+MAX_ALERT_LOG_DETAILS = int(os.getenv("MAX_ALERT_LOG_DETAILS", "120") or 120)
+MAX_SEEN_LISTINGS_PER_ALERT = int(os.getenv("MAX_SEEN_LISTINGS_PER_ALERT", "1000") or 1000)
 
 
 DEFAULT_SETTINGS = {
@@ -79,7 +84,46 @@ def read_json(path: Path, default: Any) -> Any:
 
 
 def write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _numeric_key(value: Any) -> int:
+    text = str(value or "").strip()
+    if text.startswith("id:"):
+        text = text[3:]
+    return int(text) if text.isdigit() else -1
+
+
+def _dedupe_cap(values: Any, limit: int = MAX_SEEN_LISTINGS_PER_ALERT, prefer_numeric: bool = False) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    if prefer_numeric:
+        numeric = [value for value in deduped if _numeric_key(value) >= 0]
+        other = [value for value in deduped if _numeric_key(value) < 0]
+        numeric = sorted(numeric, key=_numeric_key, reverse=True)
+        deduped = [*numeric, *other]
+    return deduped[: max(limit, 1)]
+
+
+def trim_alert_runtime_state(alert: dict[str, Any]) -> dict[str, Any]:
+    clean = dict(alert or {})
+    clean["seen_listing_ids"] = _dedupe_cap(clean.get("seen_listing_ids"), prefer_numeric=True)
+    clean["seen_listing_urls"] = _dedupe_cap(clean.get("seen_listing_urls"))
+    clean["seen_listing_keys"] = _dedupe_cap(clean.get("seen_listing_keys"), prefer_numeric=True)
+    clean["sent_listing_keys"] = _dedupe_cap(clean.get("sent_listing_keys"), prefer_numeric=True)
+    clean["notified_listing_keys"] = _dedupe_cap(clean.get("notified_listing_keys"), prefer_numeric=True)
+    return clean
 
 
 def get_history() -> list[dict[str, Any]]:
@@ -198,7 +242,7 @@ def get_alerts() -> list[dict[str, Any]]:
 
 
 def write_alerts(alerts: list[dict[str, Any]]) -> None:
-    write_json(ALERTS_PATH, alerts)
+    write_json(ALERTS_PATH, [trim_alert_runtime_state(alert) for alert in alerts])
 
 
 def save_alert(alert: dict[str, Any]) -> dict[str, Any]:
@@ -222,7 +266,14 @@ def get_alert_logs() -> list[dict[str, Any]]:
 
 
 def write_alert_logs(logs: list[dict[str, Any]]) -> None:
-    write_json(ALERT_LOGS_PATH, logs)
+    capped_logs = []
+    for log in logs[: max(MAX_ALERT_LOGS, 1)]:
+        item = dict(log or {})
+        details = item.get("details")
+        if isinstance(details, list):
+            item["details"] = [str(value)[:1000] for value in details[: max(MAX_ALERT_LOG_DETAILS, 1)]]
+        capped_logs.append(item)
+    write_json(ALERT_LOGS_PATH, capped_logs)
 
 
 def add_alert_log(log: dict[str, Any]) -> dict[str, Any]:

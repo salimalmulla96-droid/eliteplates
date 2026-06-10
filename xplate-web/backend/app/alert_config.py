@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 import logging
 
+from .storage import ALERT_CONFIG_PATH
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,7 +107,16 @@ class AlertConfig:
     
     def _load_config_file(self) -> dict[str, Any]:
         """Load configuration from JSON file if it exists."""
-        config_path = Path(__file__).parent.parent.parent / 'alert_config.json'
+        config_path = ALERT_CONFIG_PATH
+        legacy_path = Path(__file__).parent.parent / 'alert_config.json'
+        if not config_path.exists() and legacy_path.exists():
+            try:
+                data = json.loads(legacy_path.read_text(encoding='utf-8'))
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+                return data
+            except Exception as e:
+                logger.warning(f"Failed to migrate legacy config file: {e}")
         if config_path.exists():
             try:
                 with open(config_path, 'r') as f:

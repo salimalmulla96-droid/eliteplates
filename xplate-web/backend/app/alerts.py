@@ -2,6 +2,7 @@ import html
 import uuid
 import time
 import re
+import traceback
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -13,7 +14,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .models import Alert, AlertLog, SearchRequest
 from .scraper import search_xplate, price_to_number, city_to_xplate_param, match_number_formats, normalize_number_formats, number_format_label
 from .filters import apply_filters, sort_results
-from .storage import DATA_DIR, ALERTS_PATH, get_alerts, save_alert, write_alerts, add_alert_log, get_alert_logs, clear_alert_logs, get_settings
+from .storage import DATA_DIR, ALERTS_PATH, get_alerts, save_alert, write_alerts, add_alert_log, get_alert_logs, clear_alert_logs, get_settings, trim_alert_runtime_state
 from . import plate_tracking
 from .alert_config import get_config
 
@@ -21,11 +22,13 @@ RUNNING_ALERTS: dict[str, bool] = {}
 DISABLED_SKIP_LOGGED: set[str] = set()
 SCHEDULER: BackgroundScheduler | None = None
 LAST_SCAN_TIME = ''
+LAST_ERROR: str | None = None
 STOP_ALL_ALERTS_ACTIVE = False
 STOP_ALL_REQUESTED_AT = ''
 AUTO_MAX_PAGES_PER_SCAN = 20
 AUTO_MAX_LISTINGS_PER_SCAN = 1000
 AUTO_FRESH_LISTING_WINDOW_MINUTES = 15
+LAST_PLATE_CLEANUP_DATE = ''
 
 
 def _coerce_positive_int(value: Any, fallback: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -723,12 +726,21 @@ def send_telegram_plate_alert(bot_token: str, chat_id: str, alert: Alert, listin
             'skip_reason': 'Emergency stop-all is active',
             'telegram_response': {},
         }
-    if alert.id and not _storage_alert_enabled(str(alert.id)):
+    storage_alert = _storage_alert(str(alert.id or '')) if alert.id else None
+    if alert.id and not (storage_alert and _is_enabled_value(storage_alert.get('enabled'))):
         print("Telegram skipped: alert is disabled or missing in storage")
         return {
             'sent': False,
             'skipped': True,
             'skip_reason': 'Alert is disabled or missing in storage',
+            'telegram_response': {},
+        }
+    if storage_alert and _listing_already_sent(storage_alert, listing):
+        print("Telegram skipped: listing was already sent")
+        return {
+            'sent': False,
+            'skipped': True,
+            'skip_reason': 'Listing was already sent',
             'telegram_response': {},
         }
     city_matched, skip_reason, normalized_alert_city, normalized_listing_city = _city_filter_decision(alert, listing)
@@ -743,6 +755,58 @@ def send_telegram_plate_alert(bot_token: str, chat_id: str, alert: Alert, listin
             'normalized_listing_city': normalized_listing_city,
             'telegram_response': {},
         }
+    format_decision = _format_match_decision(alert, listing)
+    if not format_decision.get('matched'):
+        skip_reason = format_decision.get('skip_reason') or 'number format mismatch'
+        print("Telegram skipped by final number format guard:", skip_reason)
+        return {
+            'sent': False,
+            'skipped': True,
+            'skip_reason': skip_reason,
+            'city_matched': True,
+            'normalized_alert_city': normalized_alert_city,
+            'normalized_listing_city': normalized_listing_city,
+            'telegram_response': {},
+        }
+    bot_token = str(bot_token or '').strip()
+    chat_id = normalize_telegram_channel_id(chat_id)
+    if not bot_token or not chat_id:
+        skip_reason = 'Telegram is not configured'
+        print("Telegram skipped:", skip_reason)
+        return {
+            'sent': False,
+            'skipped': True,
+            'skip_reason': skip_reason,
+            'city_matched': True,
+            'normalized_alert_city': normalized_alert_city,
+            'normalized_listing_city': normalized_listing_city,
+            'telegram_response': {},
+        }
+    config = get_config()
+    city = str(listing.get('city', '') or '').strip()
+    code = str(listing.get('code', '') or '').strip()
+    plate_number = str(listing.get('plate_number', '') or '').strip()
+    if config.enable_dedup_messages and city and plate_number:
+        should_send, existing_plate = plate_tracking.should_send_telegram(
+            city,
+            code,
+            plate_number,
+            cooldown_seconds=config.duplicate_cooldown_seconds,
+            alert_id=alert.id,
+        )
+        if not should_send:
+            skip_reason = f"Duplicate/cooldown protection active for {config.duplicate_cooldown_seconds} seconds"
+            print("Telegram skipped:", skip_reason)
+            return {
+                'sent': False,
+                'skipped': True,
+                'skip_reason': skip_reason,
+                'city_matched': True,
+                'normalized_alert_city': normalized_alert_city,
+                'normalized_listing_city': normalized_listing_city,
+                'plate_info': existing_plate,
+                'telegram_response': {},
+            }
     message = build_telegram_message(alert, listing, plate_info)
     response = send_telegram_message(bot_token, chat_id, message)
     return {
@@ -916,6 +980,27 @@ def _storage_alert_enabled(alert_id: str) -> bool:
     return bool(current and _is_enabled_value(current.get('enabled')))
 
 
+def _storage_alert(alert_id: str) -> dict[str, Any] | None:
+    return next((item for item in get_alerts() if str(item.get('id') or '') == str(alert_id or '')), None)
+
+
+def _listing_already_sent(alert_data: dict[str, Any], listing: dict[str, Any]) -> bool:
+    sent = set(alert_data.get('sent_listing_keys') or [])
+    sent.update(alert_data.get('notified_listing_keys') or [])
+    key = _listing_key(listing)
+    url = _listing_url(listing)
+    listing_id = _extract_listing_id(listing)
+    return (
+        bool(key and key in sent)
+        or bool(url and f"url:{url}" in sent)
+        or bool(listing_id is not None and f"id:{listing_id}" in sent)
+    )
+
+
+def _trim_alert_model(alert: Alert) -> Alert:
+    return Alert(**trim_alert_runtime_state(alert.model_dump()))
+
+
 def _mark_listing_key(target: set[str], row: dict[str, Any]) -> None:
     key = _listing_key(row)
     if key:
@@ -954,6 +1039,9 @@ def _search_rows(alert: Alert) -> list[dict[str, Any]]:
     search_depth = "All pages"
     alert_cities = [_city_to_scraper_value(city) for city in _alert_cities(alert)]
     if alert.send_all_new_plates:
+        if stop_all_active() or (alert.id and not _storage_alert_enabled(str(alert.id))):
+            print(f"Alert search stopped before scan: id={alert.id or '(missing)'}")
+            return []
         for city in alert_cities or [""]:
             _log_scraper_city(alert, city)
         return search_xplate(
@@ -981,6 +1069,9 @@ def _search_rows(alert: Alert) -> list[dict[str, Any]]:
         cities = [""]
 
     for city in cities:
+        if stop_all_active() or (alert.id and not _storage_alert_enabled(str(alert.id))):
+            print(f"Alert search stopped before city scan: id={alert.id or '(missing)'} city={city or 'All cities'}")
+            break
         _log_scraper_city(alert, city)
         page_rows = search_xplate(
             number=alert.plate_number,
@@ -1061,6 +1152,7 @@ def initialize_baseline(alert_dict: dict[str, Any]) -> dict[str, Any]:
     alert.last_match_count = len(rows)
     alert.last_status = 'baseline_completed'
     alert.updated_at = now_str
+    alert = _trim_alert_model(alert)
 
     save_alert(alert.model_dump())
     log = AlertLog(
@@ -1096,6 +1188,7 @@ def initialize_baseline(alert_dict: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
+    global LAST_ERROR
     alert_dict = _ensure_alert_city_fields(alert_dict)
     alert = Alert(**alert_dict)
     alert.number_formats = normalize_number_formats(alert.number_formats, fallback=alert.number_format)
@@ -1217,6 +1310,50 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             }
 
         matches = _search_rows(alert)
+        if not dry_run and (stop_all_active() or not _storage_alert_enabled(str(alert.id or ''))):
+            checked_at = now.strftime('%Y-%m-%d %H:%M:%S')
+            reason = 'Emergency stop-all became active during scan.' if stop_all_active() else 'Alert was disabled or removed during scan.'
+            add_alert_log(AlertLog(
+                id=str(uuid.uuid4()),
+                alert_id=alert_id,
+                alert_name=alert.name,
+                checked_at=checked_at,
+                status='stopped',
+                event_type='Skipped',
+                severity='warning',
+                message=f"Stopped alert rule after scraping and before filtering/sending: {_alert_display_name(alert)}.",
+                matches_count=0,
+                sent_notifications=0,
+                error='',
+                listing={},
+                reason=reason,
+                details=[
+                    *_alert_identity_lines(alert),
+                    reason,
+                    f"Listings discarded before send: {len(matches)}",
+                    'No Telegram messages sent.',
+                ],
+            ).model_dump())
+            print(f"Scan stopped before send: alert_id={alert.id or '(missing)'} reason={reason}")
+            matches.clear()
+            return {
+                'ok': True,
+                'total_scraped': 0,
+                'scraped': 0,
+                'matched': 0,
+                'new_after_baseline': 0,
+                'skipped_baseline': 0,
+                'eligible_to_send': 0,
+                'sent': 0,
+                'failed': 0,
+                'skipped_old': 0,
+                'skipped_featured': 0,
+                'skipped_city_mismatch': 0,
+                'skipped_duplicate': 0,
+                'telegram_ready': False,
+                'telegram_attempts': 0,
+                'message': f'Stopped: {reason}',
+            }
         fresh_window = _auto_fresh_listing_window(alert)
         auto_max_pages = _auto_max_pages_per_scan(alert)
         row_logs: list[str] = []
@@ -1640,12 +1777,17 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                     break
                 send_result = send_telegram_plate_alert(bot_token, chat_id, alert, row)
                 if send_result.get('skipped'):
-                    final_city_guard_skips += 1
                     skip_reason = send_result.get('skip_reason') or 'City mismatch'
-                    if skip_reason == 'City missing for city-specific alert':
-                        city_missing_rejects += 1
+                    if 'duplicate' in skip_reason.lower() or 'already sent' in skip_reason.lower():
+                        duplicate_send_skips += 1
                     else:
-                        city_mismatch_rejects += 1
+                        final_city_guard_skips += 1
+                        if skip_reason == 'City missing for city-specific alert':
+                            city_missing_rejects += 1
+                        elif 'format' in skip_reason.lower():
+                            format_rejects += 1
+                        else:
+                            city_mismatch_rejects += 1
                     guard_lines = _city_send_decision_lines(alert, row, False, skip_reason)
                     row_logs.extend(guard_lines)
                     send_logs.extend(guard_lines)
@@ -1704,6 +1846,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
         alert.seen_listing_keys = list(baseline_seen)
         alert.max_seen_listing_id = max_seen_listing_id
         alert.updated_at = now.strftime('%Y-%m-%d %H:%M:%S')
+        alert = _trim_alert_model(alert)
 
         if stop_all_active() or not _storage_alert_enabled(str(alert.id or alert_id)):
             row_logs.append('Alert state not saved because emergency stop-all is active or the alert is disabled/missing in storage.')
@@ -1791,24 +1934,40 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             details=[*row_logs[:300], *send_logs[:100]]
         )
         add_alert_log(log.model_dump())
+        total_scraped_count = len(matches)
+        queued_count = len(to_notify)
+        decision_logs_response = row_logs[:200]
+        print(
+            f"Scan finished: alert_id={alert.id or '(missing)'} "
+            f"name={_alert_display_name(alert)} listings_found={total_scraped_count} "
+            f"skipped_old={skipped_old} sent={sent} error={'; '.join(errors) if errors else 'none'}"
+        )
+        matches.clear()
+        unique_matches.clear()
+        final_matches.clear()
+        to_notify.clear()
+        row_logs.clear()
+        send_logs.clear()
 
-        if len(to_notify) == 0:
+        if queued_count == 0:
             message = f"Run completed: {effective_matching_count} listings found, 0 new after baseline. Nothing was sent."
             if effective_matching_count:
                 message += " No Telegram messages sent because all listings were already in baseline."
         elif telegram_failed and not sent:
-            message = f"Run completed: {effective_matching_count} listings found, {len(to_notify)} new listing(s) found, but Telegram failed: {'; '.join(errors)}."
+            message = f"Run completed: {effective_matching_count} listings found, {queued_count} new listing(s) found, but Telegram failed: {'; '.join(errors)}."
         elif telegram_failed:
-            message = f"Run completed: {effective_matching_count} listings found, {len(to_notify)} new after baseline, {sent} sent, {telegram_failed} failed."
+            message = f"Run completed: {effective_matching_count} listings found, {queued_count} new after baseline, {sent} sent, {telegram_failed} failed."
         else:
-            message = f"Run completed: {effective_matching_count} listings found, {len(to_notify)} new listing(s) sent to Telegram." if sent else f"Run completed: {effective_matching_count} listings found, {len(to_notify)} new after baseline, 0 sent."
+            message = f"Run completed: {effective_matching_count} listings found, {queued_count} new listing(s) sent to Telegram." if sent else f"Run completed: {effective_matching_count} listings found, {queued_count} new after baseline, 0 sent."
 
+        if not errors:
+            LAST_ERROR = None
         return {
             'ok': True,
-            'total_scraped': len(matches),
-            'scraped': len(matches),
+            'total_scraped': total_scraped_count,
+            'scraped': total_scraped_count,
             'matched': effective_matching_count,
-            'new_after_baseline': len(to_notify),
+            'new_after_baseline': queued_count,
             'skipped_baseline': skipped_baseline,
             'eligible_to_send': eligible_to_send,
             'sent': sent,
@@ -1827,10 +1986,32 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             'telegram_token_found': bool(bot_token),
             'telegram_channel_found': bool(chat_id),
             'errors': errors,
-            'decision_logs': row_logs,
+            'decision_logs': decision_logs_response,
             'message': message,
         }
+    except MemoryError as exc:
+        LAST_ERROR = f"MemoryError while scanning alert {alert_id}"
+        now = datetime.utcnow()
+        add_alert_log(AlertLog(
+            id=str(uuid.uuid4()),
+            alert_id=alert_id,
+            alert_name=alert.name,
+            checked_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+            status='error',
+            event_type='Error',
+            severity='error',
+            message=LAST_ERROR,
+            matches_count=0,
+            sent_notifications=0,
+            error=LAST_ERROR,
+            reason='Alert check failed because memory was exhausted.',
+            details=[*_alert_identity_lines(alert), LAST_ERROR],
+        ).model_dump())
+        print(LAST_ERROR)
+        matches.clear()
+        return {'ok': False, 'error': LAST_ERROR}
     except Exception as exc:
+        LAST_ERROR = str(exc)
         now = datetime.utcnow()
         log = AlertLog(
             id=str(uuid.uuid4()),
@@ -1851,11 +2032,14 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             ]
         )
         add_alert_log(log.model_dump())
+        print(f"Alert check failed for {alert_id}: {exc}")
+        traceback.print_exc()
+        matches.clear()
         return {'ok': False, 'error': str(exc)}
 
 
 def _check_due_alerts():
-    global LAST_SCAN_TIME
+    global LAST_SCAN_TIME, LAST_ERROR, LAST_PLATE_CLEANUP_DATE
     alerts = get_alerts()
     now = datetime.utcnow()
     LAST_SCAN_TIME = now.strftime('%Y-%m-%d %H:%M:%S')
@@ -1879,6 +2063,16 @@ def _check_due_alerts():
     print(f"Alert scheduler scan active alert IDs: {', '.join(active_ids) if active_ids else '(none)'}")
     print(f"Active alert names: {', '.join(active_names) if active_names else '(none)'}")
     print(f"Active alert cities: {', '.join(active_cities) if active_cities else '(none)'}")
+    if not enabled_alerts:
+        clear_scheduler_cache()
+        print("Alert scheduler scan: no enabled alerts in storage. No Telegram sends will run.")
+        return
+    config = get_config()
+    today = now.strftime('%Y-%m-%d')
+    if LAST_PLATE_CLEANUP_DATE != today:
+        deleted = plate_tracking.cleanup_old_plates(config.cleanup_old_plates_days)
+        LAST_PLATE_CLEANUP_DATE = today
+        print(f"Plate tracking cleanup: deleted {deleted} records older than {config.cleanup_old_plates_days} days")
     for a in alerts:
         try:
             print(f"Alert scheduler scan rule: id={a.get('id') or '(missing)'} name={a.get('name') or '(unnamed)'} cities={a.get('cities') or a.get('city') or 'All cities'} enabled={'yes' if _is_enabled_value(a.get('enabled')) else 'no'}")
@@ -1922,16 +2116,66 @@ def _check_due_alerts():
                     due = now >= last_dt + timedelta(seconds=interval_seconds)
                 except Exception:
                     due = True
-            if due and not RUNNING_ALERTS.get(a.get('id')):
-                RUNNING_ALERTS[a.get('id')] = True
+            alert_id = str(a.get('id') or '').strip()
+            if due and RUNNING_ALERTS.get(alert_id):
+                print(f"Alert scheduler skipped active scan: id={alert_id or '(missing)'} name={a.get('name') or '(unnamed)'}")
+                continue
+            if due:
+                RUNNING_ALERTS[alert_id] = True
                 try:
-                    check_alert(a)
+                    print(
+                        f"Scan started: alert_id={alert_id or '(missing)'} "
+                        f"name={a.get('name') or '(unnamed)'} cities={a.get('cities') or a.get('city') or 'All cities'} "
+                        f"interval={interval_seconds}s"
+                    )
+                    result = check_alert(a)
+                    if not result.get('ok'):
+                        LAST_ERROR = str(result.get('error') or 'Alert scan failed')
                 finally:
                     if stop_all_active():
-                        RUNNING_ALERTS.pop(a.get('id'), None)
+                        RUNNING_ALERTS.pop(alert_id, None)
                     else:
-                        RUNNING_ALERTS[a.get('id')] = False
-        except Exception:
+                        RUNNING_ALERTS[alert_id] = False
+        except MemoryError:
+            LAST_ERROR = f"MemoryError in scheduler for alert {a.get('id') or '(missing)'}"
+            print(LAST_ERROR)
+            RUNNING_ALERTS.pop(str(a.get('id') or ''), None)
+            add_alert_log(AlertLog(
+                id=str(uuid.uuid4()),
+                alert_id=str(a.get('id') or ''),
+                alert_name=str(a.get('name') or ''),
+                checked_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+                status='error',
+                event_type='Error',
+                severity='error',
+                message=LAST_ERROR,
+                matches_count=0,
+                sent_notifications=0,
+                error=LAST_ERROR,
+                reason='Scheduler memory protection caught MemoryError.',
+                details=['Scheduler caught MemoryError.', 'Scheduler will continue with future runs.'],
+            ).model_dump())
+            continue
+        except Exception as exc:
+            LAST_ERROR = str(exc)
+            print(f"Alert scheduler error for id={a.get('id') or '(missing)'}: {exc}")
+            traceback.print_exc()
+            RUNNING_ALERTS.pop(str(a.get('id') or ''), None)
+            add_alert_log(AlertLog(
+                id=str(uuid.uuid4()),
+                alert_id=str(a.get('id') or ''),
+                alert_name=str(a.get('name') or ''),
+                checked_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+                status='error',
+                event_type='Error',
+                severity='error',
+                message=f"Scheduler error: {exc}",
+                matches_count=0,
+                sent_notifications=0,
+                error=str(exc),
+                reason='Scheduler caught an alert exception and continued.',
+                details=[traceback.format_exc()],
+            ).model_dump())
             continue
 
 
@@ -1948,7 +2192,7 @@ def start_scheduler():
     print(f"Enabled alerts count: {len([alert for alert in alerts if _is_enabled_value(alert.get('enabled'))])}")
     print(f"Telegram configured: {'yes' if telegram_configured else 'no'}")
     SCHEDULER = BackgroundScheduler()
-    SCHEDULER.add_job(_check_due_alerts, 'interval', seconds=10, id='alerts_checker')
+    SCHEDULER.add_job(_check_due_alerts, 'interval', seconds=10, id='alerts_checker', max_instances=1, coalesce=True)
     SCHEDULER.start()
     print(f"Scheduler started: {'yes' if SCHEDULER.running else 'no'}")
     return SCHEDULER

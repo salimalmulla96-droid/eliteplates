@@ -40,6 +40,12 @@ from .scraper import (
 from .storage import (
     DATA_DIR,
     ALERTS_PATH,
+    ALERT_LOGS_PATH,
+    FAVORITES_PATH,
+    HISTORY_PATH,
+    INSTAGRAM_SEEN_POSTS_PATH,
+    INSTAGRAM_SETTINGS_PATH,
+    SETTINGS_PATH,
     clear_favorites,
     clear_history,
     delete_favorite,
@@ -55,6 +61,7 @@ from .storage import get_alerts, save_alert, delete_alert, get_alert_logs, add_a
 from . import alerts as alerts_module
 from . import instagram_monitor
 from . import plate_tracking
+from .alert_config import get_config
 
 
 app = FastAPI(title="Xplate Scout API")
@@ -63,11 +70,14 @@ allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://eliteplates-six.vercel.app",
+    "https://eliteplates-snowy.vercel.app",
 ]
 
 frontend_url = os.getenv("FRONTEND_URL")
-if frontend_url and frontend_url not in allowed_origins:
-    allowed_origins.append(frontend_url)
+if frontend_url:
+    for origin in [item.strip() for item in frontend_url.split(",") if item.strip()]:
+        if origin not in allowed_origins:
+            allowed_origins.append(origin)
 
 print("Allowed CORS origins:", allowed_origins)
 
@@ -82,6 +92,43 @@ app.add_middleware(
 LATEST_RESULTS: list[dict[str, Any]] = []
 LATEST_DEBUG: list[str] = []
 JOBS: dict[str, dict[str, Any]] = {}
+
+
+def _runtime_environment() -> str:
+    explicit = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or os.getenv("RAILWAY_ENVIRONMENT") or "").strip().lower()
+    if explicit in {"production", "prod"} or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return "production"
+    return "local"
+
+
+def _telegram_configured() -> bool:
+    settings_data = get_settings()
+    return bool(
+        str(settings_data.get('telegram_bot_token', '') or '').strip()
+        and alerts_module.normalize_telegram_channel_id(settings_data.get('telegram_chat_id', '') or settings_data.get('telegram_channel_id', ''))
+    )
+
+
+def _log_production_startup() -> None:
+    alerts = get_alerts()
+    enabled_alerts = [alert for alert in alerts if _is_alert_enabled(alert)]
+    print("backend started")
+    print(f"environment: {_runtime_environment()}")
+    print(f"DATA_DIR path: {DATA_DIR}")
+    print(f"alerts storage path: {ALERTS_PATH}")
+    print(f"settings storage path: {SETTINGS_PATH}")
+    print(f"telegram settings path: {SETTINGS_PATH}")
+    print(f"instagram settings path: {INSTAGRAM_SETTINGS_PATH}")
+    print(f"instagram seen posts path: {INSTAGRAM_SEEN_POSTS_PATH}")
+    print(f"alert logs path: {ALERT_LOGS_PATH}")
+    print(f"search history path: {HISTORY_PATH}")
+    print(f"favorites path: {FAVORITES_PATH}")
+    print(f"alerts loaded count: {len(alerts)}")
+    print(f"enabled alerts count: {len(enabled_alerts)}")
+    print(f"Telegram configured: {'yes' if _telegram_configured() else 'no'}")
+    print(f"scheduler started: {'yes' if alerts_module.scheduler_running() else 'no'}")
+    print(f"current Railway PORT: {os.getenv('PORT') or '(not set)'}")
+    print(f"frontend URL / allowed CORS origins: {', '.join(allowed_origins)}")
 
 CITY_LABELS = {
     "dubai": "Dubai",
@@ -1374,25 +1421,22 @@ def api_debug_instagram_ocr():
 def api_production_status():
     alerts = get_alerts()
     enabled_alerts = [alert for alert in alerts if _is_alert_enabled(alert)]
-    settings_data = get_settings()
-    telegram_configured = bool(
-        str(settings_data.get('telegram_bot_token', '') or '').strip()
-        and alerts_module.normalize_telegram_channel_id(settings_data.get('telegram_chat_id', '') or settings_data.get('telegram_channel_id', ''))
-    )
     last_scan_time = alerts_module.LAST_SCAN_TIME or max(
         (str(alert.get('last_scan_at') or alert.get('last_checked_at') or '') for alert in alerts),
         default='',
     )
     return {
         'backend': 'running',
-        'storage_path': str(ALERTS_PATH),
+        'environment': _runtime_environment(),
         'data_dir': str(DATA_DIR),
+        'alerts_storage_path': str(ALERTS_PATH),
         'alerts_count': len(alerts),
         'enabled_alerts': len(enabled_alerts),
         'scheduler_running': alerts_module.scheduler_running(),
-        'telegram_configured': telegram_configured,
+        'telegram_configured': _telegram_configured(),
         'last_scan_time': last_scan_time,
         'active_alert_ids': alerts_module.active_alert_ids(),
+        'last_error': alerts_module.LAST_ERROR,
     }
 
 
@@ -1400,12 +1444,23 @@ def api_production_status():
 def start_alert_scheduler():
     try:
         alerts_module.start_scheduler()
-    except Exception:
-        pass
+    except Exception as exc:
+        alerts_module.LAST_ERROR = f"Alert scheduler startup failed: {exc}"
+        print(alerts_module.LAST_ERROR)
+        traceback.print_exc()
     try:
         instagram_monitor.start_instagram_scheduler()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"Instagram scheduler startup failed: {exc}")
+        traceback.print_exc()
+    try:
+        cleanup_days = get_config().cleanup_old_plates_days
+        deleted = plate_tracking.cleanup_old_plates(cleanup_days)
+        print(f"Startup cleanup: deleted {deleted} plate tracking records older than {cleanup_days} days")
+    except Exception as exc:
+        print(f"Startup cleanup failed: {exc}")
+        traceback.print_exc()
+    _log_production_startup()
 
 
 @app.on_event('shutdown')
