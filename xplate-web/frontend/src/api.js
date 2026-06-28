@@ -173,7 +173,7 @@ export async function downloadDailyRuleReport(alertId, date) {
     const blob = await response.blob()
     const disposition = response.headers.get('content-disposition') || ''
     const filenameMatch = disposition.match(/filename="?([^";]+)"?/i)
-    const filename = filenameMatch?.[1] || `xplate_rule_report_${date}.xlsx`
+    const filename = filenameMatch?.[1] || `XPLATE REPORT ${date}.xlsx`
     const objectUrl = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = objectUrl

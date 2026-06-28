@@ -2,6 +2,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from app import alerts
 from app import plate_tracking
 from app import storage
 
@@ -70,7 +71,7 @@ def test_rule_matches_are_deduplicated_and_workbook_is_grouped(tmp_path, monkeyp
     )
 
     report_path = plate_tracking.generate_daily_rule_excel_report("rule-1", "2026-06-25")
-    assert report_path == Path(reports_path / "xplate_rule_report_Dubai_VIP_watch_2026-06-25.xlsx").resolve()
+    assert report_path == Path(reports_path / "rule-1" / "XPLATE REPORT 2026-06-25.xlsx").resolve()
     workbook = load_workbook(report_path)
     assert workbook.sheetnames == ["Summary", "Dubai", "Sharjah"]
 
@@ -118,3 +119,116 @@ def test_no_data_report_has_summary_only(tmp_path, monkeypatch):
     workbook = load_workbook(report_path)
     assert workbook.sheetnames == ["Summary"]
     assert workbook["Summary"]["A4"].value == "No data found for this saved rule on the selected date."
+
+
+def test_pin_telegram_message_uses_same_chat_and_silent_notification(monkeypatch):
+    captured = {}
+
+    class Response:
+        ok = True
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"ok": True, "result": True}
+
+    def fake_post(url, json, timeout):
+        captured.update({"url": url, "payload": json, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr(alerts.requests, "post", fake_post)
+    assert alerts.pin_telegram_message("@eliteplates", 8511, "test-token")
+    assert captured["url"].endswith("/bottest-token/pinChatMessage")
+    assert captured["payload"] == {
+        "chat_id": "@eliteplates",
+        "message_id": 8511,
+        "disable_notification": True,
+    }
+    assert captured["timeout"] == 30
+
+
+def test_telegram_document_uses_exact_report_filename(tmp_path, monkeypatch):
+    report_path = tmp_path / "XPLATE REPORT 2026-06-25.xlsx"
+    report_path.write_bytes(b"test workbook")
+    captured = {}
+
+    class Response:
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"ok": True, "result": {"message_id": 8511}}
+
+    def fake_post(url, data, files, timeout):
+        captured.update({
+            "url": url,
+            "data": data,
+            "filename": files["document"][0],
+            "timeout": timeout,
+        })
+        return Response()
+
+    monkeypatch.setattr(alerts.requests, "post", fake_post)
+    response = alerts.send_telegram_document(
+        "test-token",
+        "@eliteplates",
+        str(report_path),
+        "Daily report",
+    )
+
+    assert response["ok"] is True
+    assert captured["filename"] == "XPLATE REPORT 2026-06-25.xlsx"
+
+
+def test_daily_report_pin_failure_is_non_fatal(tmp_path, monkeypatch, caplog):
+    rule = {"id": "rule-1", "name": "Dubai VIP watch", "enabled": True}
+    monkeypatch.setenv("TELEGRAM_PIN_DAILY_REPORTS", "true")
+    monkeypatch.setattr(alerts, "get_alerts", lambda: [rule])
+    monkeypatch.setattr(alerts, "_resolve_telegram_credentials", lambda alert: ("test-token", "@eliteplates"))
+    monkeypatch.setattr(
+        alerts.plate_tracking,
+        "generate_daily_rule_excel_report",
+        lambda *args, **kwargs: tmp_path / "report.xlsx",
+    )
+    monkeypatch.setattr(
+        alerts.plate_tracking,
+        "aggregate_daily_rule_report",
+        lambda *args, **kwargs: {
+            "summary": {
+                "total_unique_plates": 2,
+                "total_listing_events": 3,
+                "total_repeated_plates": 1,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        alerts,
+        "send_telegram_document",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "result": {
+                "message_id": 8511,
+                "document": {"file_name": "XPLATE REPORT 2026-06-27.xlsx"},
+            },
+        },
+    )
+    monkeypatch.setattr(alerts, "pin_telegram_message", lambda *args, **kwargs: False)
+    monkeypatch.setattr(alerts, "_daily_report_log", lambda *args, **kwargs: None)
+
+    result = alerts.send_daily_rule_report_to_telegram("rule-1", "2026-06-27")
+
+    assert result["ok"] is True
+    assert result["telegram_message_id"] == 8511
+    assert result["telegram_document_name"] == "XPLATE REPORT 2026-06-27.xlsx"
+    assert result["telegram_pinning_enabled"] is True
+    assert result["telegram_pin_attempted"] is True
+    assert result["telegram_pinned"] is False
+    assert "Telegram report sent, but pinning failed" in caplog.text
+
+
+def test_daily_report_pinning_defaults_to_disabled(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_PIN_DAILY_REPORTS", raising=False)
+    assert alerts.env_bool("TELEGRAM_PIN_DAILY_REPORTS", False) is False

@@ -45,7 +45,7 @@ export default function Exports({ visibleRows, selectedRows, favorites, sellers,
       const blobUrl = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = blobUrl
-      a.download = `xplate_daily_report_${isoDate}.xlsx`
+      a.download = `XPLATE REPORT ${isoDate}.xlsx`
       document.body.appendChild(a)
       a.click()
       a.remove()

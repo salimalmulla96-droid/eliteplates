@@ -34,6 +34,13 @@ LAST_PLATE_CLEANUP_DATE = ''
 logger = logging.getLogger(__name__)
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def _report_timezone() -> ZoneInfo:
     timezone_name = os.getenv("REPORT_TIMEZONE", "Asia/Dubai")
     try:
@@ -154,7 +161,56 @@ def send_telegram_document(
         except Exception:
             details = response.text
         raise ValueError(user_friendly_telegram_error(details)) from exc
-    return response.json()
+    result = response.json()
+    if not result.get('ok'):
+        raise ValueError(user_friendly_telegram_error(result.get('description', 'Telegram document send failed')))
+    logger.info("Telegram document sent")
+    return result
+
+
+def pin_telegram_message(
+    chat_id: str,
+    message_id: int,
+    bot_token: str | None = None,
+) -> bool:
+    """Pin a Telegram message without making report delivery depend on pinning."""
+    token = str(bot_token or os.getenv('TELEGRAM_BOT_TOKEN') or '').strip()
+    normalized_chat_id = normalize_telegram_channel_id(chat_id)
+    try:
+        normalized_message_id = int(message_id)
+    except (TypeError, ValueError):
+        normalized_message_id = 0
+    if not token or not normalized_chat_id or not normalized_message_id:
+        logger.warning("Cannot pin Telegram message: missing token, chat_id, or message_id.")
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/pinChatMessage"
+    payload = {
+        'chat_id': normalized_chat_id,
+        'message_id': normalized_message_id,
+        'disable_notification': True,
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        try:
+            data = response.json()
+        except Exception:
+            data = {'ok': False, 'description': response.text or 'Invalid Telegram response'}
+        if not response.ok or not data.get('ok'):
+            logger.warning(
+                "Telegram pin failed due to permission/config/API error: %s",
+                data.get('description') or f"HTTP {response.status_code}",
+            )
+            return False
+        logger.info("Telegram pin success: message_id=%s chat_id=%s", normalized_message_id, normalized_chat_id)
+        return True
+    except requests.RequestException:
+        # Do not log the exception because Telegram embeds the token in the URL.
+        logger.warning("Telegram pin failed due to a network/API error.")
+        return False
+    except Exception as exc:
+        logger.warning("Telegram pin failed due to an unexpected error: %s", exc)
+        return False
 
 
 def _listing_key(row: dict[str, Any]) -> str:
@@ -2320,6 +2376,32 @@ def send_daily_rule_report_to_telegram(rule_id: str, date_str: str) -> dict[str,
             "Excel report attached."
         )
         telegram_response = send_telegram_document(bot_token, chat_id, str(file_path), caption)
+        logger.info("Telegram document sent for daily rule report: rule=%s date=%s", rule_id, date_str)
+        message_id = (telegram_response.get('result') or {}).get('message_id')
+        if message_id:
+            logger.info("Telegram message id returned: %s", message_id)
+        else:
+            logger.warning("Telegram report sent but no message_id was returned, cannot pin.")
+
+        pinning_enabled = env_bool('TELEGRAM_PIN_DAILY_REPORTS', False)
+        pin_attempted = False
+        pinned = False
+        if pinning_enabled:
+            logger.info("Telegram daily report pinning enabled")
+            if message_id:
+                pin_attempted = True
+                pinned = pin_telegram_message(chat_id, message_id, bot_token)
+                if not pinned:
+                    logger.warning(
+                        "Telegram report sent, but pinning failed. Make sure the bot is admin and has pin message permission."
+                    )
+            else:
+                logger.warning(
+                    "Telegram report sent, but pinning failed. Make sure the bot is admin and has pin message permission."
+                )
+        else:
+            logger.info("Telegram daily report pinning disabled")
+
         message = f"Daily rule Excel sent successfully: {file_path}"
         logger.info(message)
         _daily_report_log(rule, date_str, 'daily_report_sent', message, severity='success')
@@ -2333,7 +2415,11 @@ def send_daily_rule_report_to_telegram(rule_id: str, date_str: str) -> dict[str,
             'total_unique_plates': summary['total_unique_plates'],
             'total_listing_events': summary['total_listing_events'],
             'repeated_plates': summary['total_repeated_plates'],
-            'telegram_message_id': (telegram_response.get('result') or {}).get('message_id'),
+            'telegram_message_id': message_id,
+            'telegram_document_name': ((telegram_response.get('result') or {}).get('document') or {}).get('file_name'),
+            'telegram_pinning_enabled': pinning_enabled,
+            'telegram_pin_attempted': pin_attempted,
+            'telegram_pinned': pinned,
         }
     except Exception as exc:
         message = f"Daily rule report send failed for {rule.get('name') or rule_id}: {exc}"

@@ -26,6 +26,10 @@ RULE_REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily_rule
 MISSING_PRICE_VALUES = {"", "?", "n/a", "na", "none", "null", "not available", "-"}
 
 
+def daily_report_filename(date_str: str) -> str:
+    return f"XPLATE REPORT {date_str}.xlsx"
+
+
 def _ensure_columns(cursor: sqlite3.Cursor, table_name: str, columns: dict[str, str]) -> None:
     """Add any missing columns for lightweight SQLite migrations."""
     existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()}
@@ -1092,7 +1096,7 @@ def generate_daily_excel_report(date_str: str) -> str:
             
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     
-    file_name = f"xplate_daily_report_{date_str}.xlsx"
+    file_name = daily_report_filename(date_str)
     file_path = REPORTS_DIR / file_name
     
     wb.save(str(file_path))
@@ -1270,9 +1274,10 @@ def generate_daily_rule_excel_report(
         city_sheet.auto_filter.ref = f"A1:H{len(sorted_rows) + 1}"
         auto_width(city_sheet, 48)
 
-    safe_rule_name = re.sub(r"[^A-Za-z0-9_-]+", "_", rule_name).strip("_") or "rule"
-    RULE_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = (RULE_REPORTS_DIR / f"xplate_rule_report_{safe_rule_name}_{date_str}.xlsx").resolve()
+    safe_rule_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(rule_id)).strip("_") or "rule"
+    rule_reports_dir = RULE_REPORTS_DIR / safe_rule_id
+    rule_reports_dir.mkdir(parents=True, exist_ok=True)
+    file_path = (rule_reports_dir / daily_report_filename(date_str)).resolve()
     workbook.save(file_path)
     logger.info("Daily rule Excel generated: rule=%s date=%s path=%s", rule_id, date_str, file_path)
     return file_path

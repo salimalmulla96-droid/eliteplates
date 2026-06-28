@@ -314,7 +314,7 @@ def get_daily_excel_report(date: str):
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="Report file could not be generated.")
             
-        filename = f"xplate_daily_report_{date}.xlsx"
+        filename = f"XPLATE REPORT {date}.xlsx"
         return FileResponse(
             path=file_path,
             filename=filename,
@@ -354,7 +354,7 @@ def download_daily_rule_report(rule_id: str, date: str):
         )
         return FileResponse(
             path=str(file_path),
-            filename=file_path.name,
+            filename=f'XPLATE REPORT {date}.xlsx',
             media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
     except Exception as exc:
