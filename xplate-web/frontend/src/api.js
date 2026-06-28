@@ -120,8 +120,8 @@ export async function disableOtherAlerts(alertId) {
   return request(`/api/alerts/${encodeURIComponent(alertId)}/disable-others`, { method: 'POST' })
 }
 
-export async function testTelegram(alertId) {
-  return request(`/api/alerts/${encodeURIComponent(alertId)}/test-telegram`, { method: 'POST' })
+export async function testTelegram() {
+  return request('/telegram/test', { method: 'POST' })
 }
 
 export async function testTelegramChannel(payload = {}) {
@@ -138,6 +138,10 @@ export async function runAlertNow(alertId) {
 
 export async function debugAlertScan(alertId) {
   return request(`/api/alerts/${encodeURIComponent(alertId)}/debug-scan`, { method: 'POST' })
+}
+
+export async function debugSendAlert(alertId) {
+  return request(`/alerts/rules/${encodeURIComponent(alertId)}/debug-send`, { method: 'POST' })
 }
 
 export async function forceSendTestListing(alertId) {

@@ -34,6 +34,7 @@ import {
   testTelegramChannel,
   runAlertNow,
   debugAlertScan,
+  debugSendAlert,
   forceSendTestListing,
   resetAlertBaseline,
   sendDailyRuleReport,
@@ -889,14 +890,14 @@ export default function Alerts({ options = {} }) {
     setMessage('')
     try {
       const response = await action()
-      if (actionName === 'run' || actionName === 'force') setRunNowResult(response)
+      if (actionName === 'run' || actionName === 'force' || actionName === 'debug-send') setRunNowResult(response)
       setMessage(typeof successMessage === 'function' ? successMessage(response) : successMessage)
       await loadAll()
     } catch (error) {
       const errorMessage = actionName.startsWith('daily-report')
         ? friendlyDailyReportError(error)
         : error?.message || 'Action failed.'
-      if (actionName === 'run' || actionName === 'force') setRunNowResult({ ok: false, message: errorMessage })
+      if (actionName === 'run' || actionName === 'force' || actionName === 'debug-send') setRunNowResult({ ok: false, message: errorMessage })
       setMessage(actionName === 'test' && errorMessage.toLowerCase().startsWith('telegram test failed') ? errorMessage : `${actionName === 'test' ? 'Telegram test failed: ' : ''}${errorMessage}`)
     } finally {
       setWorkingAlertId(null)
@@ -921,6 +922,21 @@ export default function Alerts({ options = {} }) {
     }, (response) => response.message || 'Debug scan completed.', 'debug')
   }
 
+  function handleDebugSend(alert) {
+    setRunNowResult({ ok: true, message: 'Running the rule and sending up to 5 filtered matches...' })
+    withWorking(
+      alert,
+      () => debugSendAlert(alert.id),
+      (response) => {
+        if (response.sent_count > 0) return `Sent ${response.sent_count} plate${response.sent_count === 1 ? '' : 's'} to Telegram.`
+        if (response.filtered_count === 0) return 'Rule found 0 matching plates.'
+        if (response.skipped_duplicates >= response.filtered_count) return 'Rule found matches but all were skipped as duplicates.'
+        return response.message || 'Debug Send completed.'
+      },
+      'debug-send',
+    )
+  }
+
   function handleResetBaseline(alert) {
     withWorking(alert, async () => {
       const response = await resetAlertBaseline(alert.id)
@@ -935,7 +951,7 @@ export default function Alerts({ options = {} }) {
   }
 
   function handleTestTelegram(alert) {
-    withWorking(alert, () => testTelegram(alert.id), (response) => response.message || 'Test message sent to Telegram channel.', 'test')
+    withWorking(alert, () => testTelegram(), (response) => response.message || 'Telegram test sent successfully.', 'test')
   }
 
   function dailyReportDate(alertId) {
@@ -1141,6 +1157,7 @@ export default function Alerts({ options = {} }) {
                 <button className="btn-muted" onClick={() => withWorking(alert, () => toggleAlert(alert.id), (response) => response.message || `${enabled ? 'Disabled' : 'Enabled'} ${alert.name}`, 'toggle')} disabled={workingAlertId === alert.id}>{workingAlertId === alert.id && workingAction === 'toggle' ? 'Updating...' : enabled ? 'Disable' : 'Enable'}</button>
                 <button className="btn-muted" onClick={() => handleRunNow(alert)} disabled={workingAlertId === alert.id}><Play size={14} /> {workingAlertId === alert.id && workingAction === 'run' ? 'Running...' : 'Run now'}</button>
                 <button className="btn-muted" onClick={() => handleDebugScan(alert)} disabled={workingAlertId === alert.id}><Search size={14} /> {workingAlertId === alert.id && workingAction === 'debug' ? 'Scanning...' : 'Debug'}</button>
+                <button className="btn-muted" onClick={() => handleDebugSend(alert)} disabled={workingAlertId === alert.id}><Send size={14} /> {workingAlertId === alert.id && workingAction === 'debug-send' ? 'Sending...' : 'Debug Send'}</button>
                 <div className="relative">
                   <button className="btn-muted" onClick={() => setOpenMoreRuleId(moreOpen ? null : alert.id)}><MoreHorizontal size={14} /> More</button>
                   {moreOpen && (

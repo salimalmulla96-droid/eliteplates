@@ -102,11 +102,8 @@ def _runtime_environment() -> str:
 
 
 def _telegram_configured() -> bool:
-    settings_data = get_settings()
-    return bool(
-        str(settings_data.get('telegram_bot_token', '') or '').strip()
-        and alerts_module.normalize_telegram_channel_id(settings_data.get('telegram_chat_id', '') or settings_data.get('telegram_channel_id', ''))
-    )
+    bot_token, chat_id = alerts_module.load_telegram_configuration()
+    return bool(bot_token and chat_id)
 
 
 def _log_production_startup() -> None:
@@ -571,8 +568,9 @@ def settings_save(request: SettingsRequest):
 
 @app.post("/api/telegram/verify")
 def telegram_verify(payload: dict):
-    bot_token = str(payload.get("telegram_bot_token") or get_settings().get("telegram_bot_token", "") or "").strip()
-    chat_id = alerts_module.normalize_telegram_channel_id(payload.get("telegram_chat_id") or get_settings().get("telegram_chat_id", ""))
+    configured_token, configured_chat = alerts_module.load_telegram_configuration()
+    bot_token = str(payload.get("telegram_bot_token") or configured_token or "").strip()
+    chat_id = alerts_module.normalize_telegram_channel_id(payload.get("telegram_chat_id") or configured_chat)
     result = {
         "ok": False,
         "token_valid": False,
@@ -642,18 +640,56 @@ def telegram_verify(payload: dict):
             result["raw_error"] = description or ""
             result["message"] = "Channel found, but bot admin status could not be verified. Make sure the bot is added as an admin."
         return result
+    except requests.RequestException:
+        result["message"] = "Telegram network request failed. Check Railway outbound connectivity."
+        result["raw_error"] = "Telegram network request failed"
+        return result
     except Exception as exc:
         result["message"] = alerts_module.user_friendly_telegram_error(str(exc))
         result["raw_error"] = str(exc)
         return result
 
 
+@app.post('/telegram/test')
+@app.post('/api/telegram/test')
+def telegram_test():
+    """Send a configuration-level Telegram test using env or settings values."""
+    bot_token, chat_id = alerts_module.load_telegram_configuration()
+    if not bot_token:
+        return JSONResponse(
+            status_code=400,
+            content={'ok': False, 'error': 'Telegram bot token is missing'},
+        )
+    if not chat_id:
+        return JSONResponse(
+            status_code=400,
+            content={'ok': False, 'error': 'Telegram chat ID is missing'},
+        )
+    try:
+        response = alerts_module.send_telegram_message(
+            bot_token,
+            chat_id,
+            'Xplate Scout Telegram test message',
+        )
+        return {
+            'ok': True,
+            'message': 'Telegram test message sent successfully',
+            'telegram_message_id': (response.get('result') or {}).get('message_id'),
+        }
+    except Exception as exc:
+        error = alerts_module.user_friendly_telegram_error(str(exc))
+        return JSONResponse(
+            status_code=502,
+            content={'ok': False, 'error': error, 'message': f'Telegram failed: {error}'},
+        )
+
+
 @app.post("/api/telegram/test-channel")
 def telegram_test_channel(payload: dict | None = None):
     payload = payload or {}
-    settings = get_settings()
-    bot_token = str(payload.get("telegram_bot_token") or settings.get("telegram_bot_token", "") or "").strip()
-    chat_id = alerts_module.normalize_telegram_channel_id(payload.get("telegram_chat_id") or settings.get("telegram_chat_id", "") or settings.get("telegram_channel_id", ""))
+    configured_token, configured_chat = alerts_module.load_telegram_configuration()
+    bot_token = str(payload.get("telegram_bot_token") or configured_token or "").strip()
+    chat_id = alerts_module.normalize_telegram_channel_id(payload.get("telegram_chat_id") or configured_chat)
     if not bot_token:
         return JSONResponse(status_code=400, content={"ok": False, "message": "Telegram bot token missing"})
     if not chat_id:
@@ -1027,9 +1063,7 @@ def api_test_telegram(alert_id: str):
         if not alert:
             return JSONResponse(status_code=404, content={'ok': False, 'message': 'Alert not found', 'error': 'Alert not found'})
 
-        settings_data = get_settings()
-        bot_token = str(settings_data.get('telegram_bot_token', '') or '').strip()
-        chat_id = alerts_module.normalize_telegram_channel_id(settings_data.get('telegram_chat_id', '') or settings_data.get('telegram_channel_id', ''))
+        bot_token, chat_id = alerts_module.load_telegram_configuration(alert)
         print(f"Telegram token loaded: {'yes' if bot_token else 'no'}")
         print(f"Telegram channel ID loaded: {'yes' if chat_id else 'no'}")
         details.extend([
@@ -1172,8 +1206,7 @@ def api_run_alert_now(alert_id: str):
     alert = next((a for a in alerts if a.get('id') == alert_id), None)
     if not alert:
         raise HTTPException(status_code=404, detail='Alert not found')
-    bot_token = str(alert.get('telegram_bot_token', '') or get_settings().get('telegram_bot_token', '') or '').strip()
-    chat_id = alerts_module.normalize_telegram_channel_id(alert.get('telegram_chat_id', '') or get_settings().get('telegram_chat_id', ''))
+    bot_token, chat_id = alerts_module.load_telegram_configuration(alert)
     add_alert_log({
         'id': str(uuid.uuid4()),
         'alert_id': alert_id,
@@ -1257,6 +1290,35 @@ def api_debug_alert_scan(alert_id: str):
     }
 
 
+@app.post('/alerts/rules/{rule_id}/debug-send')
+@app.post('/api/alerts/rules/{rule_id}/debug-send')
+def api_debug_send_alert(rule_id: str):
+    alert = next((item for item in get_alerts() if str(item.get('id') or '') == str(rule_id)), None)
+    if not alert:
+        raise HTTPException(status_code=404, detail='Alert rule not found.')
+    if not _is_alert_enabled(alert):
+        raise HTTPException(status_code=409, detail='Enable this alert rule before using Debug Send.')
+    try:
+        result = alerts_module.debug_send_alert_matches(alert, limit=5)
+        if not result.get('telegram_configured') and result.get('selected_count'):
+            return JSONResponse(status_code=400, content=result)
+        if result.get('failed_count') and not result.get('sent_count'):
+            return JSONResponse(status_code=502, content=result)
+        return result
+    except Exception as exc:
+        traceback.print_exc()
+        error = alerts_module.user_friendly_telegram_error(str(exc))
+        return JSONResponse(
+            status_code=500,
+            content={
+                'ok': False,
+                'message': f'Telegram failed: {error}',
+                'error': error,
+                'rule_id': rule_id,
+            },
+        )
+
+
 @app.post('/api/alerts/{alert_id}/force-test-listing')
 def api_force_test_listing(alert_id: str):
     alerts = get_alerts()
@@ -1264,8 +1326,7 @@ def api_force_test_listing(alert_id: str):
     if not alert:
         raise HTTPException(status_code=404, detail='Alert not found')
 
-    bot_token = str(alert.get('telegram_bot_token', '') or get_settings().get('telegram_bot_token', '') or '').strip()
-    chat_id = alerts_module.normalize_telegram_channel_id(alert.get('telegram_chat_id', '') or get_settings().get('telegram_chat_id', ''))
+    bot_token, chat_id = alerts_module.load_telegram_configuration(alert)
     checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     alert_cities = _normalize_alert_cities(alert)
     sample_row = {

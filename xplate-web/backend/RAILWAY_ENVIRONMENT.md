@@ -1,5 +1,17 @@
 # Railway backend variables
 
+For normal saved-rule alerts and Telegram connection tests, add these variables
+under **Railway → Backend service → Variables**:
+
+```env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+The backend also continues to support credentials saved through the Xplate
+Settings page. Rule-specific credentials take precedence, followed by Railway
+environment variables, then saved settings.
+
 To pin each daily saved-rule Excel document after Telegram accepts it, add this
 variable to the Railway **backend service**:
 

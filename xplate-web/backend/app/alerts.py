@@ -41,6 +41,55 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def mask_token(token: str) -> str:
+    value = str(token or '').strip()
+    if not value:
+        return ''
+    if len(value) <= 12:
+        return f"{value[:4]}...{value[-2:]}"
+    return f"{value[:8]}...{value[-4:]}"
+
+
+def load_telegram_configuration(alert: Alert | dict[str, Any] | None = None) -> tuple[str, str]:
+    """Resolve rule, Railway/environment, then settings-file Telegram values."""
+    if isinstance(alert, Alert):
+        rule_token = str(alert.telegram_bot_token or '').strip()
+        rule_chat = normalize_telegram_channel_id(alert.telegram_chat_id)
+    else:
+        alert_data = alert or {}
+        rule_token = str(alert_data.get('telegram_bot_token') or '').strip()
+        rule_chat = normalize_telegram_channel_id(
+            alert_data.get('telegram_chat_id') or alert_data.get('telegram_channel_id')
+        )
+    env_token = str(os.getenv('TELEGRAM_BOT_TOKEN') or '').strip()
+    env_chat = normalize_telegram_channel_id(
+        os.getenv('TELEGRAM_CHAT_ID') or os.getenv('TELEGRAM_CHANNEL_ID')
+    )
+    settings = get_settings()
+    settings_token = str(settings.get('telegram_bot_token') or '').strip()
+    settings_chat = normalize_telegram_channel_id(
+        settings.get('telegram_chat_id') or settings.get('telegram_channel_id')
+    )
+    bot_token = rule_token or env_token or settings_token
+    chat_id = rule_chat or env_chat or settings_chat
+
+    if not bot_token:
+        logger.error("Telegram bot token is missing")
+    if not chat_id:
+        logger.error("Telegram chat ID is missing")
+    if bot_token and chat_id:
+        sources = []
+        sources.append('rule' if rule_token else 'environment' if env_token else 'settings')
+        sources.append('rule' if rule_chat else 'environment' if env_chat else 'settings')
+        logger.info(
+            "Telegram configuration loaded: token=%s chat_id=%s sources=%s",
+            mask_token(bot_token),
+            chat_id,
+            '/'.join(sources),
+        )
+    return bot_token, chat_id
+
+
 def _report_timezone() -> ZoneInfo:
     timezone_name = os.getenv("REPORT_TIMEZONE", "Asia/Dubai")
     try:
@@ -89,11 +138,21 @@ def normalize_telegram_channel_id(chat_id: str | None) -> str:
 def user_friendly_telegram_error(error_text: str) -> str:
     lower = str(error_text or '').lower()
     if 'chat not found' in lower:
-        return 'Telegram channel not found. Make sure the channel ID is correct and the bot is added as an admin.'
+        return (
+            'Telegram failed: chat not found. For a private chat, press Start on the bot; '
+            'for a group, add the bot; for a channel, make it an admin. Check the chat ID.'
+        )
+    if 'bot was blocked' in lower or 'blocked by the user' in lower:
+        return 'Telegram failed: the bot was blocked. Unblock it and press Start in the private chat.'
     if 'unauthorized' in lower or 'invalid token' in lower:
         return 'Telegram bot token is invalid. Check the token from BotFather.'
     if 'forbidden' in lower or 'not enough rights' in lower or 'admin' in lower:
-        return 'Telegram bot cannot post to this channel. Add the bot as an admin and allow it to post messages.'
+        return (
+            'Telegram failed: bot is forbidden or has insufficient rights. Add it to the group, '
+            'or make it a channel admin with permission to post.'
+        )
+    if 'bad request' in lower:
+        return f"Telegram failed: bad request. Check the chat ID and bot permissions. {error_text}"
     return str(error_text or 'Telegram request failed')
 
 
@@ -101,9 +160,12 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str) -> dict[st
     bot_token = str(bot_token or '').strip()
     chat_id = normalize_telegram_channel_id(chat_id)
     if not bot_token:
+        logger.error("Telegram bot token is missing")
         raise ValueError('Telegram bot token missing')
     if not chat_id:
-        raise ValueError('Telegram channel ID missing')
+        logger.error("Telegram chat ID is missing")
+        raise ValueError('Telegram chat ID missing')
+    logger.info("Telegram configuration loaded: token=%s chat_id=%s", mask_token(bot_token), chat_id)
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": False}
     try:
@@ -111,16 +173,15 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str) -> dict[st
     except requests.RequestException:
         raise ValueError('Telegram request failed. Check the backend network connection.') from None
     try:
-        resp.raise_for_status()
-    except requests.HTTPError as exc:
-        details = ''
-        try:
-            details = resp.json().get('description', '')
-        except Exception:
-            details = resp.text
-        friendly = user_friendly_telegram_error(details)
-        raise ValueError(f"{friendly} Telegram API error: {details}") from exc
-    return resp.json()
+        data = resp.json()
+    except Exception:
+        data = {'ok': False, 'description': resp.text or f'HTTP {resp.status_code}'}
+    if not resp.ok or not data.get('ok'):
+        details = data.get('description') or resp.text or f'HTTP {resp.status_code}'
+        logger.error("Telegram send failed: status=%s response=%s", resp.status_code, details)
+        raise ValueError(user_friendly_telegram_error(details))
+    logger.info("Telegram message sent successfully")
+    return data
 
 
 def send_telegram_document(
@@ -300,14 +361,7 @@ def _format_phone(phone: str | None) -> str:
 
 
 def _resolve_telegram_credentials(alert: Alert) -> tuple[str, str]:
-    bot_token = str(alert.telegram_bot_token or '').strip()
-    chat_id = normalize_telegram_channel_id(alert.telegram_chat_id)
-    if bot_token and chat_id:
-        return bot_token, chat_id
-    settings = get_settings()
-    bot_token = bot_token or str(settings.get('telegram_bot_token', '') or '').strip()
-    chat_id = chat_id or normalize_telegram_channel_id(settings.get('telegram_chat_id', ''))
-    return bot_token, chat_id
+    return load_telegram_configuration(alert)
 
 
 def _html_escape(value: str | None) -> str:
@@ -806,25 +860,36 @@ def _telegram_price(row: dict[str, Any]) -> str:
 
 
 def build_telegram_message(alert: Alert, row: dict[str, Any], plate_info: dict[str, Any] | None = None) -> str:
+    rule_name = _html_escape(alert.name or alert.plate_number or alert.contains or alert.id or 'Saved alert')
     city = _html_escape(_clean_city(row.get('city')))
     code = _html_escape(str(row.get('code') or '?').strip() or '?')
     number = _html_escape(str(row.get('plate_number') or '?').strip() or '?')
     price = _html_escape(_telegram_price(row))
-    posted = _html_escape(_exact_posted_time(row))
+    source = _html_escape(str(row.get('source') or row.get('listing_source') or 'Website').strip() or 'Website')
     listing_url = str(row.get('listing_link') or row.get('listing_url') or row.get('url') or '').strip()
     safe_url = html.escape(listing_url, quote=True)
     plate_label = f"{city} {code} {number}".replace('  ', ' ').strip()
-    link = f'<a href="{safe_url}">Link</a>' if safe_url else 'Link'
-    return "\n".join([
-        f"🏷️ Plate: {plate_label}",
-        f"💰 Price: {price}",
-        f"🕒 Posted: {posted}",
+    lines = [
+        "🚘 <b>Xplate Scout Match</b>",
         "",
-        f"🔗 Link: {link}",
-    ])
+        f"<b>Rule:</b> {rule_name}",
+        f"<b>Plate:</b> {plate_label}",
+        f"<b>Price:</b> {price}",
+        f"<b>Source:</b> {source}",
+    ]
+    if safe_url:
+        lines.append(f'<b>Link:</b> <a href="{safe_url}">Open listing</a>')
+    return "\n".join(lines)
 
 
-def send_telegram_plate_alert(bot_token: str, chat_id: str, alert: Alert, listing: dict[str, Any], plate_info: dict[str, Any] | None = None) -> dict[str, Any]:
+def send_telegram_plate_alert(
+    bot_token: str,
+    chat_id: str,
+    alert: Alert,
+    listing: dict[str, Any],
+    plate_info: dict[str, Any] | None = None,
+    bypass_duplicate_protection: bool = False,
+) -> dict[str, Any]:
     print("Sending Telegram for alert:", _alert_display_name(alert))
     print("Alert ID:", alert.id or '(missing)')
     print("Alert city:", _alert_city_log_value(alert))
@@ -846,7 +911,7 @@ def send_telegram_plate_alert(bot_token: str, chat_id: str, alert: Alert, listin
             'skip_reason': 'Alert is disabled or missing in storage',
             'telegram_response': {},
         }
-    if storage_alert and _listing_already_sent(storage_alert, listing):
+    if not bypass_duplicate_protection and storage_alert and _listing_already_sent(storage_alert, listing):
         print("Telegram skipped: listing was already sent")
         return {
             'sent': False,
@@ -897,7 +962,7 @@ def send_telegram_plate_alert(bot_token: str, chat_id: str, alert: Alert, listin
     city = str(listing.get('city', '') or '').strip()
     code = str(listing.get('code', '') or '').strip()
     plate_number = str(listing.get('plate_number', '') or '').strip()
-    if config.enable_dedup_messages and city and plate_number:
+    if not bypass_duplicate_protection and config.enable_dedup_messages and city and plate_number:
         should_send, existing_plate = plate_tracking.should_send_telegram(
             city,
             code,
@@ -919,7 +984,14 @@ def send_telegram_plate_alert(bot_token: str, chat_id: str, alert: Alert, listin
                 'telegram_response': {},
             }
     message = build_telegram_message(alert, listing, plate_info)
-    response = send_telegram_message(bot_token, chat_id, message)
+    full_plate = " ".join(part for part in (city, code, plate_number) if part)
+    logger.info("Sending Telegram message for plate: %s", full_plate or '?')
+    try:
+        response = send_telegram_message(bot_token, chat_id, message)
+        logger.info("Telegram send success for plate: %s", full_plate or '?')
+    except Exception:
+        logger.exception("Telegram send failure for plate: %s", full_plate or '?')
+        raise
     return {
         'sent': True,
         'skipped': False,
@@ -1226,6 +1298,159 @@ def _search_rows(alert: Alert) -> list[dict[str, Any]]:
     return rows
 
 
+def debug_send_alert_matches(alert_dict: dict[str, Any], limit: int = 5) -> dict[str, Any]:
+    """Send up to five locally filtered matches while bypassing duplicate history."""
+    normalized_alert = _ensure_alert_city_fields(alert_dict)
+    alert = Alert(**normalized_alert)
+    alert.number_formats = normalize_number_formats(alert.number_formats, fallback=alert.number_format)
+    alert.number_format = number_format_label(alert.number_formats[0]) if alert.number_formats else 'Any format'
+    rule_name = _alert_display_name(alert)
+    logger.info("Running alert rule: %s", rule_name)
+
+    raw_results = _search_rows(alert)
+    logger.info("Raw results found: %s", len(raw_results))
+    unique_results: list[dict[str, Any]] = []
+    seen_listing_keys: set[str] = set()
+    for row in raw_results:
+        key = _listing_url(row) or _listing_key(row)
+        if key in seen_listing_keys:
+            continue
+        seen_listing_keys.add(key)
+        unique_results.append(row)
+
+    filtered_results: list[dict[str, Any]] = []
+    for row in unique_results:
+        city_matched, _, _, _ = _city_filter_decision(alert, row)
+        if not city_matched:
+            continue
+        if alert.alert_only_price_below and alert.price_max:
+            price_value = price_to_number(row.get('price', ''))
+            try:
+                max_price = float(alert.price_max)
+            except (TypeError, ValueError):
+                max_price = None
+            if max_price is not None and (price_value is None or price_value > max_price):
+                continue
+        if not _format_match_decision(alert, row).get('matched'):
+            continue
+        if bool(row.get('sold')) and not bool(alert.include_sold_listings):
+            continue
+        if bool(row.get('featured')) and not bool(alert.include_featured_listings):
+            continue
+        filtered_results.append(row)
+    logger.info("After local filtering: %s", len(filtered_results))
+
+    stored_alert = _storage_alert(str(alert.id or '')) or normalized_alert
+    skipped_duplicates = sum(
+        1 for row in filtered_results if _listing_already_sent(stored_alert, row)
+    )
+    selected = filtered_results[:max(1, min(int(limit or 5), 5))]
+    logger.info("New matches to send: %s (debug bypass; duplicate matches=%s)", len(selected), skipped_duplicates)
+    bot_token, chat_id = _resolve_telegram_credentials(alert)
+    telegram_configured = bool(bot_token and chat_id)
+    logger.info("Telegram configured: %s", str(telegram_configured).lower())
+
+    sent = 0
+    failures = 0
+    telegram_results: list[dict[str, Any]] = []
+    if telegram_configured:
+        for row in selected:
+            full_plate = " ".join(
+                part for part in (
+                    str(row.get('city') or '').strip(),
+                    str(row.get('code') or '').strip(),
+                    str(row.get('plate_number') or '').strip(),
+                ) if part
+            )
+            try:
+                result = send_telegram_plate_alert(
+                    bot_token,
+                    chat_id,
+                    alert,
+                    row,
+                    bypass_duplicate_protection=True,
+                )
+                if result.get('sent'):
+                    sent += 1
+                    telegram_results.append({'plate': full_plate, 'ok': True})
+                else:
+                    failures += 1
+                    telegram_results.append({
+                        'plate': full_plate,
+                        'ok': False,
+                        'error': result.get('skip_reason') or 'Telegram sender skipped the listing',
+                    })
+            except Exception as exc:
+                failures += 1
+                telegram_results.append({
+                    'plate': full_plate,
+                    'ok': False,
+                    'error': user_friendly_telegram_error(str(exc)),
+                })
+    elif selected:
+        failures = len(selected)
+        missing = []
+        if not bot_token:
+            missing.append('Telegram bot token is missing')
+        if not chat_id:
+            missing.append('Telegram chat ID is missing')
+        telegram_results.append({'plate': '', 'ok': False, 'error': '; '.join(missing)})
+
+    if not raw_results:
+        message = 'Rule found 0 matching plates.'
+    elif not filtered_results:
+        message = 'Rule found 0 matching plates after local filtering.'
+    elif not telegram_configured:
+        message = 'Telegram is not configured.'
+    elif sent:
+        message = f'Sent {sent} plate{"s" if sent != 1 else ""} to Telegram.'
+    elif skipped_duplicates:
+        message = 'Rule found matches but all were skipped as duplicates.'
+    else:
+        message = 'Telegram failed to send the matching plates.'
+
+    add_alert_log(AlertLog(
+        id=str(uuid.uuid4()),
+        alert_id=alert.id,
+        alert_name=alert.name,
+        checked_at=datetime.now(ZoneInfo('Asia/Dubai')).strftime('%Y-%m-%d %H:%M:%S'),
+        status='debug_send_success' if sent else 'debug_send_failed',
+        event_type='Sent' if sent else 'Error',
+        severity='success' if sent else 'warning',
+        message=message,
+        matches_count=len(filtered_results),
+        sent_notifications=sent,
+        error='; '.join(item.get('error', '') for item in telegram_results if item.get('error')),
+        listing=selected[0] if selected else {},
+        reason='Manual debug send bypassed duplicate history.',
+        details=[
+            f'Running alert rule: {rule_name}',
+            f'Raw results found: {len(raw_results)}',
+            f'After local filtering: {len(filtered_results)}',
+            f'New matches to send: {len(selected)}',
+            f'Skipped duplicates (bypassed for debug): {skipped_duplicates}',
+            f'Telegram configured: {str(telegram_configured).lower()}',
+            f'Telegram sent: {sent}',
+            f'Telegram failed: {failures}',
+        ],
+    ).model_dump())
+    return {
+        'ok': failures == 0 and (sent > 0 or not selected),
+        'message': message,
+        'rule_id': str(alert.id or ''),
+        'rule_name': rule_name,
+        'raw_count': len(raw_results),
+        'filtered_count': len(filtered_results),
+        'selected_count': len(selected),
+        'sent_count': sent,
+        'failed_count': failures,
+        'skipped_duplicates': skipped_duplicates,
+        'duplicate_history_bypassed': True,
+        'telegram_configured': telegram_configured,
+        'telegram_results': telegram_results,
+    }
+
+
 def initialize_baseline(alert_dict: dict[str, Any]) -> dict[str, Any]:
     alert_dict = _ensure_alert_city_fields(alert_dict)
     alert = Alert(**alert_dict)
@@ -1305,6 +1530,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
     alert.number_formats = normalize_number_formats(alert.number_formats, fallback=alert.number_format)
     alert.number_format = number_format_label(alert.number_formats[0]) if alert.number_formats else 'Any format'
     alert_id = alert.id or str(uuid.uuid4())
+    logger.info("Running alert rule: %s", _alert_display_name(alert))
     if alert.baseline_created and alert.baseline_completed and not alert.max_seen_listing_id:
         alert.max_seen_listing_id = _derive_max_seen_listing_id(alert)
         alert_dict['max_seen_listing_id'] = alert.max_seen_listing_id
@@ -1421,6 +1647,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             }
 
         matches = _search_rows(alert)
+        logger.info("Raw results found: %s", len(matches))
         if not dry_run and (stop_all_active() or not _storage_alert_enabled(str(alert.id or ''))):
             checked_at = now.strftime('%Y-%m-%d %H:%M:%S')
             reason = 'Emergency stop-all became active during scan.' if stop_all_active() else 'Alert was disabled or removed during scan.'
@@ -1563,6 +1790,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                 continue
             final_matches.append(row)
 
+        logger.info("After local filtering: %s", len(final_matches))
         baseline_seen = _get_seen_keys(alert)
         sent_keys = _get_sent_keys(alert)
         max_seen_listing_id = int(alert.max_seen_listing_id or 0)
@@ -1687,6 +1915,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
                 f"Daily rule report events stored: {stored_rule_events} new of {len(to_notify)} matching listing(s)"
             )
 
+        logger.info("New matches to send: %s", len(to_notify))
         row_logs.append(f'New listings after baseline: {len(to_notify)}')
         recent_count = sum(1 for row in final_matches if is_recent_posted_text(_posted_when(row), fresh_window))
         row_logs.extend([
@@ -1717,6 +1946,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
         errors: list[str] = []
         bot_token, chat_id = _resolve_telegram_credentials(alert)
         telegram_ready = bool(bot_token and chat_id)
+        logger.info("Telegram configured: %s", str(telegram_ready).lower())
         if to_notify and not bot_token:
             errors.append('Telegram bot token missing')
         if to_notify and not chat_id:
@@ -2071,9 +2301,15 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
         send_logs.clear()
 
         if queued_count == 0:
-            message = f"Run completed: {effective_matching_count} listings found, 0 new after baseline. Nothing was sent."
-            if effective_matching_count:
-                message += " No Telegram messages sent because all listings were already in baseline."
+            if effective_matching_count and already_notified_rejects >= effective_matching_count:
+                message = 'Rule found matches but all were skipped as duplicates.'
+            else:
+                message = f"Run completed: {effective_matching_count} listings found, 0 new after baseline. Nothing was sent."
+                if effective_matching_count:
+                    message += (
+                        f" Already sent: {already_notified_rejects}; "
+                        f"old/baseline: {skipped_old}; featured: {featured_rejects}; sold: {sold_rejects}."
+                    )
         elif telegram_failed and not sent:
             message = f"Run completed: {effective_matching_count} listings found, {queued_count} new listing(s) found, but Telegram failed: {'; '.join(errors)}."
         elif telegram_failed:
@@ -2101,6 +2337,7 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             'final_city_guard_skips': final_city_guard_skips,
             'matched_city': matched_city_count,
             'skipped_duplicate': duplicate_send_skips,
+            'skipped_already_sent': already_notified_rejects,
             'skipped_price': price_rejects,
             'telegram_ready': telegram_ready,
             'telegram_attempts': telegram_attempts,
