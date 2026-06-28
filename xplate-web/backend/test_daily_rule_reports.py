@@ -121,6 +121,59 @@ def test_no_data_report_has_summary_only(tmp_path, monkeypatch):
     assert workbook["Summary"]["A4"].value == "No data found for this saved rule on the selected date."
 
 
+def test_general_daily_report_uses_selected_date_and_allowed_columns(tmp_path, monkeypatch):
+    monkeypatch.setattr(plate_tracking, "DB_PATH", tmp_path / "plate_tracking.db")
+    monkeypatch.setattr(plate_tracking, "REPORTS_DIR", tmp_path / "daily")
+    plate_tracking.init_db()
+    plate_tracking.insert_listing_event(
+        city="Dubai",
+        plate_code="A",
+        plate_number="12345",
+        source="Website",
+        price="AED 12,000",
+        listing_url="https://example.test/1",
+        seen_at="2026-06-28 08:00:00",
+    )
+    plate_tracking.insert_listing_event(
+        city="Sharjah",
+        plate_code="3",
+        plate_number="7777",
+        source="Instagram",
+        price="",
+        listing_url="https://example.test/2",
+        seen_at="2026-06-27 23:59:59",
+    )
+
+    report_path = Path(plate_tracking.generate_daily_excel_report("2026-06-28"))
+    workbook = load_workbook(report_path)
+
+    assert report_path.name == "XPLATE REPORT 2026-06-28.xlsx"
+    assert workbook.sheetnames == ["Summary", "Dubai"]
+    assert [cell.value for cell in workbook["Dubai"][1]] == [
+        "Full Plate",
+        "Digits",
+        "Source",
+        "Times Uploaded Today",
+        "Price",
+        "All Prices Seen",
+        "Listing Links",
+        "Notes",
+    ]
+    assert workbook["Dubai"]["A2"].value == "Dubai A 12345"
+
+
+def test_general_no_data_report_has_clear_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(plate_tracking, "DB_PATH", tmp_path / "plate_tracking.db")
+    monkeypatch.setattr(plate_tracking, "REPORTS_DIR", tmp_path / "daily")
+    plate_tracking.init_db()
+
+    report_path = plate_tracking.generate_daily_excel_report("2026-06-28")
+    workbook = load_workbook(report_path)
+
+    assert workbook.sheetnames == ["Summary"]
+    assert workbook["Summary"]["A4"].value == "No data found for this date"
+
+
 def test_pin_telegram_message_uses_same_chat_and_silent_notification(monkeypatch):
     captured = {}
 

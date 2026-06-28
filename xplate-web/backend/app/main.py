@@ -300,9 +300,11 @@ def api_health():
 
 
 @app.get("/reports/daily-excel")
-def get_daily_excel_report(date: str):
+def download_daily_excel(date: str):
     """Generate and download the compiled daily report Excel sheet for date YYYY-MM-DD."""
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+    try:
+        datetime.strptime(str(date or ''), '%Y-%m-%d')
+    except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
         
     try:

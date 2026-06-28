@@ -1,44 +1,56 @@
 import { useState } from 'react'
 import { Download, Loader2 } from 'lucide-react'
 
-function todayLocalIsoDate() {
-  const now = new Date()
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
-  return local.toISOString().split('T')[0]
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+
+export function todayUaeIsoDate(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Dubai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day}`
 }
 
 export default function Exports({ visibleRows, selectedRows, favorites, sellers, exportCsv, exportExcel }) {
-  const [selectedDate, setSelectedDate] = useState(todayLocalIsoDate)
-  const [downloadState, setDownloadState] = useState({ loading: false, success: false, error: null })
+  const [selectedDate, setSelectedDate] = useState(todayUaeIsoDate)
+  const [downloadState, setDownloadState] = useState({ loading: false, success: false, error: null, message: '' })
 
   async function handleDownloadReport() {
-    setDownloadState({ loading: true, success: false, error: null })
+    const uaeToday = todayUaeIsoDate()
+    const isoDate = selectedDate || uaeToday
+    if (!selectedDate) setSelectedDate(isoDate)
+    setDownloadState({
+      loading: true,
+      success: false,
+      error: null,
+      message: isoDate === uaeToday ? 'Downloading today’s Excel report...' : `Downloading Excel report for ${isoDate}...`,
+    })
     try {
-      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
-      const isoDate = selectedDate // HTML date inputs always produce YYYY-MM-DD
       const url = `${API_BASE_URL}/reports/daily-excel?date=${isoDate}`
-      console.log('Downloading daily report from:', url)
+      console.log('Downloading daily Excel report from:', url)
 
       let response
       try {
         response = await fetch(url)
-      } catch (networkErr) {
-        throw new Error('Backend server is not reachable. Make sure FastAPI is running on localhost:8000.')
+      } catch {
+        throw new Error('Backend server is not reachable.')
       }
 
       if (!response.ok) {
         if (response.status === 404) {
-          throw new Error('No daily report data found for this date.')
+          throw new Error(isoDate === uaeToday ? 'No plates found for today.' : `No plates found for ${isoDate}.`)
         }
-        let msg = `Request failed: ${response.status}`
         try {
           const text = await response.text()
-          const parsed = JSON.parse(text)
-          msg = parsed.detail || parsed.message || msg
+          console.error('Daily report backend error:', text)
         } catch {
-          // Keep the HTTP status message when the backend returns a file or plain text.
+          // The friendly message below is sufficient when no response body is available.
         }
-        throw new Error(msg)
+        throw new Error('Report download failed.')
       }
 
       const blob = await response.blob()
@@ -51,10 +63,21 @@ export default function Exports({ visibleRows, selectedRows, favorites, sellers,
       a.remove()
       window.URL.revokeObjectURL(blobUrl)
 
-      setDownloadState({ loading: false, success: true, error: null })
+      setDownloadState({
+        loading: false,
+        success: true,
+        error: null,
+        message: 'Daily Excel report downloaded successfully.',
+      })
     } catch (err) {
       console.error('Daily report download failed:', err)
-      setDownloadState({ loading: false, success: false, error: err.message || 'Failed to download report' })
+      const errorMessage = [
+        'Backend server is not reachable.',
+        'No plates found for today.',
+        `No plates found for ${isoDate}.`,
+        'Report download failed.',
+      ].includes(err?.message) ? err.message : 'Report download failed.'
+      setDownloadState({ loading: false, success: false, error: errorMessage, message: '' })
     }
   }
 
@@ -85,7 +108,7 @@ export default function Exports({ visibleRows, selectedRows, favorites, sellers,
               value={selectedDate}
               onChange={(event) => {
                 setSelectedDate(event.target.value)
-                setDownloadState({ loading: false, success: false, error: null })
+                setDownloadState({ loading: false, success: false, error: null, message: '' })
               }}
             />
           </div>
@@ -93,15 +116,17 @@ export default function Exports({ visibleRows, selectedRows, favorites, sellers,
           <button
             className="btn-primary w-full whitespace-nowrap sm:w-auto"
             onClick={handleDownloadReport}
-            disabled={downloadState.loading || !selectedDate}
+            disabled={downloadState.loading}
           >
             {downloadState.loading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-            {downloadState.loading ? 'Generating...' : 'Download Daily Excel Report'}
+            {downloadState.loading ? 'Downloading...' : 'Download Daily Excel'}
           </button>
         </div>
 
-        {downloadState.success && (
-          <p className="mt-4 text-sm font-semibold text-emerald-400">Report successfully generated and downloaded.</p>
+        {downloadState.message && (
+          <p className={`mt-4 text-sm font-semibold ${downloadState.success ? 'text-emerald-400' : 'text-sky-300'}`}>
+            {downloadState.message}
+          </p>
         )}
         {downloadState.error && (
           <p className="mt-4 text-sm font-semibold text-red-400">Error: {downloadState.error}</p>

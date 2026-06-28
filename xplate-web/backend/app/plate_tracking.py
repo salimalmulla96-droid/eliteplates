@@ -521,7 +521,7 @@ def insert_listing_event(
     price_clean = _price_for_report(price)
         
     if not seen_at:
-        seen_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        seen_at = datetime.now(ZoneInfo("Asia/Dubai")).strftime('%Y-%m-%d %H:%M:%S')
     elif isinstance(seen_at, datetime):
         seen_at = seen_at.strftime('%Y-%m-%d %H:%M:%S')
     else:
@@ -952,7 +952,7 @@ def generate_daily_excel_report(date_str: str) -> str:
     ws_summary.cell(row=2, column=1, value=f"Report date: {date_str}").font = Font(name="Segoe UI", size=11, italic=True)
     
     if not city_sheets:
-        ws_summary.cell(row=4, column=1, value="No data found for the selected date.").font = font_body_bold
+        ws_summary.cell(row=4, column=1, value="No data found for this date").font = font_body_bold
         ws_summary.cell(row=4, column=1).fill = fill_accent
         ws_summary.cell(row=6, column=1, value="Metric")
         ws_summary.cell(row=6, column=2, value="Value")
