@@ -1,4 +1,5 @@
 import argparse
+import json
 import re
 import time
 from datetime import datetime
@@ -853,6 +854,25 @@ def clean_result_row(row: dict[str, str]) -> dict[str, str]:
     return cleaned
 
 
+def log_daily_listing_events(rows: list[dict[str, str]], debug_callback: Callable[[str], None] | None = None) -> None:
+    """Record raw website listing events for daily Excel reports."""
+    try:
+        from . import plate_tracking
+
+        for row in rows:
+            plate_tracking.insert_listing_event(
+                city=row.get("city", ""),
+                plate_code=row.get("code", ""),
+                plate_number=row.get("plate_number", ""),
+                source="Website",
+                price=row.get("price", ""),
+                listing_url=row.get("listing_link", ""),
+                raw_data_json=json.dumps(row, ensure_ascii=False, default=str),
+            )
+    except Exception as exc:
+        debug_print(f"Failed to log listing events to tracking database: {exc}", debug_callback)
+
+
 def matches_search_mode(plate_number: str, searched_number: str, search_mode: str) -> bool:
     mode = normalize_search_mode(search_mode)
     plate_number = str(plate_number or "")
@@ -1172,6 +1192,7 @@ def search_xplate(
             final_rows.append(clean_result_row(row))
         final_rows = apply_deal_rank(final_rows)
         final_rows = sort_results(final_rows, sort_mode)
+        log_daily_listing_events(final_rows, debug_callback)
         debug_print(f"Done. Final results: {len(final_rows)}", debug_callback)
         return final_rows
 
@@ -1192,6 +1213,8 @@ def search_xplate(
     final_rows = apply_deal_rank(final_rows)
     final_rows = sort_results(final_rows, sort_mode)
     debug_print(f"Done. Final results: {len(final_rows)}", debug_callback)
+    log_daily_listing_events(final_rows, debug_callback)
+        
     return final_rows
 
 

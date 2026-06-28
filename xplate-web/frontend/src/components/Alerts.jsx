@@ -5,6 +5,7 @@ import {
   Bell,
   ChevronDown,
   CheckCircle2,
+  Download,
   Eye,
   FileText,
   Gauge,
@@ -35,6 +36,8 @@ import {
   debugAlertScan,
   forceSendTestListing,
   resetAlertBaseline,
+  sendDailyRuleReport,
+  downloadDailyRuleReport,
   getAlertLogs,
   clearAlertLogs,
   stopAllAlerts,
@@ -129,6 +132,26 @@ const intervalPresets = [
   { seconds: 300, label: '5 min' },
   { seconds: 1200, label: '20 min' },
 ]
+
+const defaultDailyReportDate = new Date(Date.now() + (4 * 60 * 60 * 1000) - (24 * 60 * 60 * 1000))
+  .toISOString()
+  .slice(0, 10)
+
+function friendlyDailyReportError(error) {
+  const message = String(error?.message || '')
+  const lowered = message.toLowerCase()
+  if (error?.isConnectionError || lowered.includes('failed to fetch') || lowered.includes('backend connection')) {
+    return 'Backend server is not reachable.'
+  }
+  if (lowered.includes('telegram is not configured') || lowered.includes('telegram bot token') || lowered.includes('telegram channel')) {
+    return 'Telegram is not configured.'
+  }
+  if (lowered.includes('no plates found') || lowered.includes('no data found')) {
+    return 'No plates found for this rule on this date.'
+  }
+  if (lowered.includes('disabled rules')) return 'Enable this rule before generating its daily report.'
+  return message || 'Report generation failed.'
+}
 const presetIntervalSeconds = intervalPresets.map((preset) => preset.seconds)
 
 const CITY_OPTIONS = [
@@ -465,6 +488,7 @@ export default function Alerts({ options = {} }) {
   const [instagramAccountsText, setInstagramAccountsText] = useState('')
   const [formatMenuOpen, setFormatMenuOpen] = useState(false)
   const [formatQuery, setFormatQuery] = useState('')
+  const [dailyReportDates, setDailyReportDates] = useState({})
 
   const mergedOptions = {
     codes: options.codes || CODE_OPTIONS,
@@ -869,7 +893,9 @@ export default function Alerts({ options = {} }) {
       setMessage(typeof successMessage === 'function' ? successMessage(response) : successMessage)
       await loadAll()
     } catch (error) {
-      const errorMessage = error?.message || 'Action failed.'
+      const errorMessage = actionName.startsWith('daily-report')
+        ? friendlyDailyReportError(error)
+        : error?.message || 'Action failed.'
       if (actionName === 'run' || actionName === 'force') setRunNowResult({ ok: false, message: errorMessage })
       setMessage(actionName === 'test' && errorMessage.toLowerCase().startsWith('telegram test failed') ? errorMessage : `${actionName === 'test' ? 'Telegram test failed: ' : ''}${errorMessage}`)
     } finally {
@@ -910,6 +936,32 @@ export default function Alerts({ options = {} }) {
 
   function handleTestTelegram(alert) {
     withWorking(alert, () => testTelegram(alert.id), (response) => response.message || 'Test message sent to Telegram channel.', 'test')
+  }
+
+  function dailyReportDate(alertId) {
+    return dailyReportDates[alertId] || defaultDailyReportDate
+  }
+
+  function handleSendDailyReport(alert) {
+    const date = dailyReportDate(alert.id)
+    setOpenMoreRuleId(null)
+    withWorking(
+      alert,
+      () => sendDailyRuleReport(alert.id, date),
+      (response) => response.message || `Daily Excel report sent for ${date}.`,
+      'daily-report-send',
+    )
+  }
+
+  function handleDownloadDailyReport(alert) {
+    const date = dailyReportDate(alert.id)
+    setOpenMoreRuleId(null)
+    withWorking(
+      alert,
+      () => downloadDailyRuleReport(alert.id, date),
+      (response) => `Daily Excel downloaded: ${response.filename}`,
+      'daily-report-download',
+    )
   }
 
   async function handleTestChannelAlert() {
@@ -1092,7 +1144,21 @@ export default function Alerts({ options = {} }) {
                 <div className="relative">
                   <button className="btn-muted" onClick={() => setOpenMoreRuleId(moreOpen ? null : alert.id)}><MoreHorizontal size={14} /> More</button>
                   {moreOpen && (
-                    <div className="absolute right-0 z-30 mt-2 w-48 rounded-2xl border border-slate-800 bg-slate-950 p-2 shadow-2xl">
+                    <div className="absolute right-0 z-30 mt-2 w-72 rounded-2xl border border-slate-800 bg-slate-950 p-2 shadow-2xl">
+                      <label className="block px-3 pb-2 pt-1 text-xs font-bold uppercase tracking-wide text-slate-500">
+                        Daily report date
+                        <input
+                          type="date"
+                          className="input mt-2"
+                          value={dailyReportDate(alert.id)}
+                          onChange={(event) => setDailyReportDates((current) => ({ ...current, [alert.id]: event.target.value }))}
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      </label>
+                      <button className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => handleSendDailyReport(alert)} disabled={!enabled || workingAlertId === alert.id}><Send size={14} /> {workingAlertId === alert.id && workingAction === 'daily-report-send' ? 'Sending Excel...' : 'Send Daily Excel Now'}</button>
+                      <button className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => handleDownloadDailyReport(alert)} disabled={!enabled || workingAlertId === alert.id}><Download size={14} /> {workingAlertId === alert.id && workingAction === 'daily-report-download' ? 'Preparing download...' : 'Download Daily Excel'}</button>
+                      {!enabled && <p className="px-3 pb-2 text-xs text-amber-300">Enable this rule to generate daily reports.</p>}
+                      <div className="my-1 border-t border-slate-800" />
                       <button className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-900" onClick={() => { setOpenMoreRuleId(null); handleResetBaseline(alert) }} disabled={workingAlertId === alert.id}><RefreshCw size={14} /> Reset baseline</button>
                       <button className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-900" onClick={() => { setOpenMoreRuleId(null); handleTestTelegram(alert) }} disabled={workingAlertId === alert.id}><Send size={14} /> Test Telegram</button>
                       <button className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-rose-200 hover:bg-rose-500/10" onClick={() => { setOpenMoreRuleId(null); setPendingDelete(alert.id) }}><Trash2 size={14} /> Delete</button>

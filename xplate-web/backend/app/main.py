@@ -11,7 +11,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from .exports import export_csv, export_excel
 from .filters import apply_filters, seller_summary, summarize
@@ -300,6 +300,83 @@ def root_health():
 @app.get("/api/health")
 def api_health():
     return {"status": "ok", "app": "Xplate Scout"}
+
+
+@app.get("/reports/daily-excel")
+def get_daily_excel_report(date: str):
+    """Generate and download the compiled daily report Excel sheet for date YYYY-MM-DD."""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+        
+    try:
+        from .plate_tracking import generate_daily_excel_report
+        file_path = generate_daily_excel_report(date)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Report file could not be generated.")
+            
+        filename = f"xplate_daily_report_{date}.xlsx"
+        return FileResponse(
+            path=file_path,
+            filename=filename,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
+
+
+def _daily_rule_request(rule_id: str, date: str) -> dict[str, Any]:
+    try:
+        datetime.strptime(str(date or ''), '%Y-%m-%d')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date format. Use YYYY-MM-DD.') from exc
+    rule = next((item for item in get_alerts() if str(item.get('id') or '') == str(rule_id)), None)
+    if not rule:
+        raise HTTPException(status_code=404, detail='Alert rule not found.')
+    if not _is_alert_enabled(rule):
+        raise HTTPException(status_code=409, detail='Disabled rules do not generate or send daily reports.')
+    return rule
+
+
+@app.get('/alerts/rules/{rule_id}/daily-report')
+@app.get('/api/alerts/rules/{rule_id}/daily-report')
+def download_daily_rule_report(rule_id: str, date: str):
+    """Generate and download a rule-specific daily Excel workbook."""
+    rule = _daily_rule_request(rule_id, date)
+    try:
+        file_path = plate_tracking.generate_daily_rule_excel_report(rule_id, date)
+        alerts_module._daily_report_log(
+            rule,
+            date,
+            'daily_report_generated',
+            f'Daily rule Excel generated for download: {file_path}',
+            severity='success',
+        )
+        return FileResponse(
+            path=str(file_path),
+            filename=file_path.name,
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f'Report generation failed: {exc}') from exc
+
+
+@app.post('/alerts/rules/{rule_id}/send-daily-report')
+@app.post('/api/alerts/rules/{rule_id}/send-daily-report')
+def send_daily_rule_report(rule_id: str, date: str):
+    """Generate and immediately send a rule-specific workbook to Telegram."""
+    _daily_rule_request(rule_id, date)
+    try:
+        return alerts_module.send_daily_rule_report_to_telegram(rule_id, date)
+    except ValueError as exc:
+        status_code = 400 if str(exc) == 'Telegram is not configured.' else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Alert rule not found.') from exc
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=f'Telegram send failed: {exc}') from exc
 
 
 @app.get("/api/options")

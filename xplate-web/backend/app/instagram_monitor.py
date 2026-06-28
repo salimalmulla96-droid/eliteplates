@@ -449,6 +449,46 @@ def _instagram_caption(post: dict[str, Any], settings: dict[str, Any] | None = N
     return "\n".join(lines)
 
 
+def _log_instagram_listings(post: dict[str, Any]) -> None:
+    """Extract plate details from caption and OCR text, then save to daily_listings."""
+    try:
+        import json
+        from . import plate_tracking
+        
+        caption = post.get("caption", "")
+        ocr_text = post.get("ocr_text", "")
+        post_link = _post_link(post)
+        
+        # 1. Try to extract from caption
+        cap_details = _extract_plate_details(caption)
+        if cap_details.get("plate_number") and cap_details.get("city"):
+            plate_tracking.insert_listing_event(
+                city=cap_details["city"],
+                plate_code=cap_details.get("code", ""),
+                plate_number=cap_details["plate_number"],
+                source="Instagram",
+                price=cap_details.get("price") or post.get("price") or "",
+                listing_url=post_link,
+                raw_data_json=json.dumps(post)
+            )
+            
+        # 2. Try to extract from OCR text
+        if ocr_text and ocr_text != "No readable plate text detected":
+            ocr_details = _extract_plate_details(ocr_text)
+            if ocr_details.get("plate_number") and ocr_details.get("city"):
+                plate_tracking.insert_listing_event(
+                    city=ocr_details["city"],
+                    plate_code=ocr_details.get("code", ""),
+                    plate_number=ocr_details["plate_number"],
+                    source="OCR Instagram",
+                    price=ocr_details.get("price") or post.get("price") or "",
+                    listing_url=post_link,
+                    raw_data_json=json.dumps(post)
+                )
+    except Exception as e:
+        pass
+
+
 def _telegram_credentials() -> tuple[str, str, str]:
     global_settings = get_settings()
     bot_token = str(global_settings.get("telegram_bot_token", "") or "").strip()
@@ -734,6 +774,7 @@ def run_instagram_check(ignore_baseline: bool = False) -> dict[str, Any]:
             post["username"] = _clean_username(post.get("username", "")) or username or "?"
             post["seller_name"] = str(post.get("seller_name") or "?").strip() or "?"
             post["phone_number"] = _extract_instagram_phone(post.get("caption", ""), post.get("ocr_text", ""))
+            _log_instagram_listings(post)
             posts.append(post)
             key = _post_key(post)
             account_seen = _seen_for_account(seen, username)

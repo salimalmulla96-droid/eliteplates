@@ -1,4 +1,6 @@
 import html
+import logging
+import os
 import uuid
 import time
 import re
@@ -29,6 +31,15 @@ AUTO_MAX_PAGES_PER_SCAN = 20
 AUTO_MAX_LISTINGS_PER_SCAN = 1000
 AUTO_FRESH_LISTING_WINDOW_MINUTES = 15
 LAST_PLATE_CLEANUP_DATE = ''
+logger = logging.getLogger(__name__)
+
+
+def _report_timezone() -> ZoneInfo:
+    timezone_name = os.getenv("REPORT_TIMEZONE", "Asia/Dubai")
+    try:
+        return ZoneInfo(timezone_name)
+    except Exception:
+        return ZoneInfo("UTC")
 
 
 def _coerce_positive_int(value: Any, fallback: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -88,7 +99,10 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str) -> dict[st
         raise ValueError('Telegram channel ID missing')
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": False}
-    resp = requests.post(url, json=payload, timeout=10)
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+    except requests.RequestException:
+        raise ValueError('Telegram request failed. Check the backend network connection.') from None
     try:
         resp.raise_for_status()
     except requests.HTTPError as exc:
@@ -100,6 +114,47 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str) -> dict[st
         friendly = user_friendly_telegram_error(details)
         raise ValueError(f"{friendly} Telegram API error: {details}") from exc
     return resp.json()
+
+
+def send_telegram_document(
+    bot_token: str,
+    chat_id: str,
+    file_path: str,
+    caption: str,
+) -> dict[str, Any]:
+    """Send a generated report through Telegram Bot API sendDocument."""
+    bot_token = str(bot_token or '').strip()
+    chat_id = normalize_telegram_channel_id(chat_id)
+    if not bot_token or not chat_id:
+        raise ValueError('Telegram is not configured.')
+    url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+    try:
+        with open(file_path, 'rb') as document:
+            response = requests.post(
+                url,
+                data={'chat_id': chat_id, 'caption': caption},
+                files={
+                    'document': (
+                        os.path.basename(file_path),
+                        document,
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    )
+                },
+                timeout=30,
+            )
+    except requests.RequestException:
+        # Telegram embeds the bot token in its request URL. Never allow a
+        # connection exception (and therefore that URL) into logs/API errors.
+        raise ValueError('Telegram request failed. Check the backend network connection.') from None
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        try:
+            details = response.json().get('description', '')
+        except Exception:
+            details = response.text
+        raise ValueError(user_friendly_telegram_error(details)) from exc
+    return response.json()
 
 
 def _listing_key(row: dict[str, Any]) -> str:
@@ -1566,6 +1621,16 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
             row_logs.extend([*decision_log, "matched_filters: yes", "telegram_sent: pending", "will_send: True", "send_decision: send", "skip_reason: none"])
             row_logs.append(f"Queued listing ID {listing_id or '(missing)'} because {'posted text is recent' if recent_posted else 'listing ID is newer than baseline'}")
 
+        if not dry_run and to_notify:
+            stored_rule_events = plate_tracking.store_alert_rule_matches(
+                str(alert.id or alert_id),
+                alert.name or str(alert.id or alert_id),
+                [row for _, row in to_notify],
+            )
+            row_logs.append(
+                f"Daily rule report events stored: {stored_rule_events} new of {len(to_notify)} matching listing(s)"
+            )
+
         row_logs.append(f'New listings after baseline: {len(to_notify)}')
         recent_count = sum(1 for row in final_matches if is_recent_posted_text(_posted_when(row), fresh_window))
         row_logs.extend([
@@ -2179,6 +2244,144 @@ def _check_due_alerts():
             continue
 
 
+def _daily_report_log(
+    rule: dict[str, Any],
+    date_str: str,
+    status: str,
+    message: str,
+    severity: str = 'warning',
+    error: str = '',
+) -> None:
+    add_alert_log({
+        'id': str(uuid.uuid4()),
+        'alert_id': str(rule.get('id') or ''),
+        'alert_name': str(rule.get('name') or rule.get('id') or ''),
+        'checked_at': datetime.now(ZoneInfo('Asia/Dubai')).strftime('%Y-%m-%d %H:%M:%S'),
+        'status': status,
+        'event_type': 'Daily report',
+        'severity': severity,
+        'message': message,
+        'matches_count': 0,
+        'sent_notifications': 0,
+        'error': error,
+        'listing': {},
+        'reason': f'Daily saved rule report for {date_str}.',
+        'details': [
+            f"Rule ID: {rule.get('id') or '(missing)'}",
+            f"Rule name: {rule.get('name') or rule.get('id') or '(unnamed)'}",
+            f"Report date: {date_str}",
+            message,
+        ],
+    })
+
+
+def send_daily_rule_report_to_telegram(rule_id: str, date_str: str) -> dict[str, Any]:
+    """Generate one saved rule's daily workbook and send it with sendDocument."""
+    datetime.strptime(date_str, '%Y-%m-%d')
+    rule = next((item for item in get_alerts() if str(item.get('id') or '') == str(rule_id)), None)
+    if not rule:
+        raise KeyError('Alert rule not found')
+    if not _is_enabled_value(rule.get('enabled')):
+        message = f"Daily report skipped because rule is disabled: {rule.get('name') or rule_id}"
+        logger.warning(message)
+        _daily_report_log(rule, date_str, 'daily_report_skipped', message)
+        raise ValueError('Disabled rules do not generate or send daily reports.')
+
+    logger.info("Daily rule report started: rule=%s date=%s", rule_id, date_str)
+    _daily_report_log(
+        rule,
+        date_str,
+        'daily_report_started',
+        f"Daily rule report started for {rule.get('name') or rule_id}.",
+    )
+    alert_model = Alert(**_ensure_alert_city_fields(rule))
+    bot_token, chat_id = _resolve_telegram_credentials(alert_model)
+    if not bot_token or not chat_id:
+        message = f"Telegram is not configured; daily report skipped for rule {rule.get('name') or rule_id}."
+        logger.warning(message)
+        _daily_report_log(rule, date_str, 'daily_report_skipped', message)
+        raise ValueError('Telegram is not configured.')
+
+    try:
+        file_path = plate_tracking.generate_daily_rule_excel_report(
+            rule_id,
+            date_str,
+            telegram_sent_status='Prepared for Telegram sending',
+        )
+        report_data = plate_tracking.aggregate_daily_rule_report(rule_id, date_str)
+        summary = report_data['summary']
+        caption = (
+            "Xplate Scout Daily Rule Report\n\n"
+            f"Rule: {rule.get('name') or rule_id}\n"
+            f"Date: {date_str}\n"
+            f"Total unique plates: {summary['total_unique_plates']}\n"
+            f"Total listing events: {summary['total_listing_events']}\n"
+            f"Repeated plates: {summary['total_repeated_plates']}\n\n"
+            "Excel report attached."
+        )
+        telegram_response = send_telegram_document(bot_token, chat_id, str(file_path), caption)
+        message = f"Daily rule Excel sent successfully: {file_path}"
+        logger.info(message)
+        _daily_report_log(rule, date_str, 'daily_report_sent', message, severity='success')
+        return {
+            'ok': True,
+            'message': f"Daily Excel report sent for {rule.get('name') or rule_id}.",
+            'rule_id': str(rule_id),
+            'rule_name': str(rule.get('name') or rule_id),
+            'date': date_str,
+            'file_path': str(file_path),
+            'total_unique_plates': summary['total_unique_plates'],
+            'total_listing_events': summary['total_listing_events'],
+            'repeated_plates': summary['total_repeated_plates'],
+            'telegram_message_id': (telegram_response.get('result') or {}).get('message_id'),
+        }
+    except Exception as exc:
+        message = f"Daily rule report send failed for {rule.get('name') or rule_id}: {exc}"
+        logger.exception(message)
+        _daily_report_log(rule, date_str, 'daily_report_failed', message, severity='error', error=str(exc))
+        raise
+
+
+def generate_previous_day_rule_reports() -> dict[str, int]:
+    """Send yesterday's rule-specific workbook for every enabled saved rule."""
+    report_date = (datetime.now(_report_timezone()) - timedelta(days=1)).strftime('%Y-%m-%d')
+    counts = {'sent': 0, 'skipped': 0, 'failed': 0}
+    logger.info("Automatic daily rule reports started for %s", report_date)
+    for rule in get_alerts():
+        rule_id = str(rule.get('id') or '')
+        if not _is_enabled_value(rule.get('enabled')):
+            counts['skipped'] += 1
+            message = f"Automatic daily report skipped because rule is disabled: {rule.get('name') or rule_id}"
+            logger.info(message)
+            _daily_report_log(rule, report_date, 'daily_report_skipped', message)
+            continue
+        try:
+            send_daily_rule_report_to_telegram(rule_id, report_date)
+            counts['sent'] += 1
+        except ValueError as exc:
+            if str(exc) == 'Telegram is not configured.':
+                counts['skipped'] += 1
+            else:
+                counts['failed'] += 1
+        except Exception:
+            counts['failed'] += 1
+    logger.info("Automatic daily rule reports completed for %s: %s", report_date, counts)
+    return counts
+
+
+def generate_previous_day_report():
+    """APScheduler task to generate the Excel report for the previous day."""
+    report_timezone = _report_timezone()
+    prev_date = (datetime.now(report_timezone) - timedelta(days=1)).strftime('%Y-%m-%d')
+    try:
+        print(f"Daily Report: Generating previous day report for {prev_date}...")
+        from .plate_tracking import generate_daily_excel_report
+        file_path = generate_daily_excel_report(prev_date)
+        print(f"Daily Report: Successfully generated report for {prev_date} at {file_path}")
+    except Exception as e:
+        print(f"Daily Report: Failed to automatically generate daily report for {prev_date}: {e}")
+
+
 def start_scheduler():
     global SCHEDULER
     if SCHEDULER is not None:
@@ -2191,8 +2394,30 @@ def start_scheduler():
     print(f"Alerts loaded count: {len(alerts)}")
     print(f"Enabled alerts count: {len([alert for alert in alerts if _is_enabled_value(alert.get('enabled'))])}")
     print(f"Telegram configured: {'yes' if telegram_configured else 'no'}")
-    SCHEDULER = BackgroundScheduler()
+    report_timezone = _report_timezone()
+    SCHEDULER = BackgroundScheduler(timezone=report_timezone)
     SCHEDULER.add_job(_check_due_alerts, 'interval', seconds=10, id='alerts_checker', max_instances=1, coalesce=True)
+    # Add daily Excel report generation job just after local report midnight.
+    SCHEDULER.add_job(
+        generate_previous_day_report,
+        'cron',
+        hour=0,
+        minute=5,
+        id='daily_report_generator',
+        max_instances=1,
+        coalesce=True,
+        timezone=report_timezone,
+    )
+    SCHEDULER.add_job(
+        generate_previous_day_rule_reports,
+        'cron',
+        hour=0,
+        minute=5,
+        id='daily_rule_report_sender',
+        max_instances=1,
+        coalesce=True,
+        timezone=report_timezone,
+    )
     SCHEDULER.start()
     print(f"Scheduler started: {'yes' if SCHEDULER.running else 'no'}")
     return SCHEDULER

@@ -148,6 +148,51 @@ export async function resetAlertBaseline(alertId) {
   return request(`/api/alerts/${encodeURIComponent(alertId)}/reset-baseline`, { method: 'POST' })
 }
 
+export async function sendDailyRuleReport(alertId, date) {
+  const query = new URLSearchParams({ date }).toString()
+  return request(`/api/alerts/rules/${encodeURIComponent(alertId)}/send-daily-report?${query}`, { method: 'POST' })
+}
+
+export async function downloadDailyRuleReport(alertId, date) {
+  const query = new URLSearchParams({ date }).toString()
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/alerts/rules/${encodeURIComponent(alertId)}/daily-report?${query}`)
+    if (!response.ok) {
+      const text = await response.text()
+      let message = text || 'Report generation failed.'
+      try {
+        const parsed = JSON.parse(text)
+        message = parsed.message || parsed.error || parsed.detail || message
+      } catch {
+        // Keep the backend response as-is when it is not JSON.
+      }
+      const error = new Error(typeof message === 'string' ? message : JSON.stringify(message))
+      error.status = response.status
+      throw error
+    }
+    const blob = await response.blob()
+    const disposition = response.headers.get('content-disposition') || ''
+    const filenameMatch = disposition.match(/filename="?([^";]+)"?/i)
+    const filename = filenameMatch?.[1] || `xplate_rule_report_${date}.xlsx`
+    const objectUrl = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = objectUrl
+    anchor.download = filename
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(objectUrl)
+    return { ok: true, filename }
+  } catch (error) {
+    if (error instanceof TypeError) {
+      const connectionError = new Error('Backend server is not reachable.')
+      connectionError.isConnectionError = true
+      throw connectionError
+    }
+    throw error
+  }
+}
+
 export async function getAlertLogs() {
   return request('/api/alerts/logs')
 }
