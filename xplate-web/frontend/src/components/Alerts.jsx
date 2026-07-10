@@ -490,6 +490,7 @@ export default function Alerts({ options = {} }) {
   const [formatMenuOpen, setFormatMenuOpen] = useState(false)
   const [formatQuery, setFormatQuery] = useState('')
   const [dailyReportDates, setDailyReportDates] = useState({})
+  const [monitorStatus, setMonitorStatus] = useState(null)
 
   const mergedOptions = {
     codes: options.codes || CODE_OPTIONS,
@@ -502,6 +503,7 @@ export default function Alerts({ options = {} }) {
   const telegramConfigured = Boolean(settings.telegram_bot_token && normalizedChannelPreview)
   const enabledAlertList = alertsList.filter(isAlertEnabled)
   const enabledRules = enabledAlertList.length
+  const monitorRunning = monitorStatus?.scheduler_running === true
   const multipleAlertsEnabled = enabledRules > 1
   const selectedIntervalSeconds = Number(form.monitoring_interval_seconds || form.check_interval_seconds || (Number(form.check_interval_minutes || 1) * 60) || 20)
   const customIntervalSelected = form.monitoring_interval_mode === 'custom' || !presetIntervalSeconds.includes(selectedIntervalSeconds)
@@ -555,12 +557,19 @@ export default function Alerts({ options = {} }) {
 
   async function loadAll() {
     try {
-      const [alertResponse, logResponse, settingsResponse, instagramResponse] = await Promise.all([getAlerts(), getAlertLogs(), api.settings(), api.getInstagramSettings()])
+      const [alertResponse, logResponse, settingsResponse, instagramResponse, monitorResponse] = await Promise.all([
+        getAlerts(),
+        getAlertLogs(),
+        api.settings(),
+        api.getInstagramSettings(),
+        api.alertMonitorStatus(),
+      ])
       const alertsList = normalizeAlertsResponse(alertResponse)
       console.log("Reloaded alerts:", alertsList)
       setAlertsList(alertsList)
       setLogs(logResponse.logs || [])
       setSettings(settingsResponse.settings || {})
+      setMonitorStatus(monitorResponse || null)
       const nextInstagramSettings = { ...DEFAULT_INSTAGRAM_SETTINGS, ...(instagramResponse.settings || {}) }
       setInstagramSettings(nextInstagramSettings)
       setInstagramAccountsText((nextInstagramSettings.accounts || []).map((account) => account.username || account).join('\n'))
@@ -1242,6 +1251,7 @@ export default function Alerts({ options = {} }) {
           </div>
           <div className="flex flex-wrap gap-2 text-sm">
             <span className={`rounded-full border px-3 py-1.5 font-bold ${statusBadge(telegramConfigured ? 'Ready' : 'Warning')}`}>Telegram {telegramConfigured ? 'configured' : 'missing'}</span>
+            <span className={`rounded-full border px-3 py-1.5 font-bold ${statusBadge(monitorRunning ? 'Ready' : 'Warning')}`}>Backend monitor {monitorRunning ? 'running' : 'offline'}</span>
             <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5 font-bold text-slate-200">{enabledRules} enabled</span>
           </div>
         </div>
@@ -1502,6 +1512,15 @@ export default function Alerts({ options = {} }) {
 
           {activeTab === 'Monitoring & Logs' && (
             <div className="space-y-6">
+              <Card title="Backend Monitor" helper="Railway backend scheduler status. This page only reads status and logs." icon={Radio} action={<button className="btn-muted" onClick={loadAll}><RefreshCw size={14} /> Refresh</button>}>
+                <div className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-2xl bg-slate-900/70 p-3"><span className="text-slate-500">Scheduler</span><p className="mt-1 font-bold text-white">{monitorRunning ? 'Running' : 'Not running'}</p></div>
+                  <div className="rounded-2xl bg-slate-900/70 p-3"><span className="text-slate-500">Enabled rules</span><p className="mt-1 font-bold text-white">{monitorStatus?.enabled_rules ?? enabledRules}</p></div>
+                  <div className="rounded-2xl bg-slate-900/70 p-3"><span className="text-slate-500">Last tick</span><p className="mt-1 break-words font-bold text-white">{formatRuleTimestamp(monitorStatus?.last_tick)}</p></div>
+                  <div className="rounded-2xl bg-slate-900/70 p-3"><span className="text-slate-500">Next run</span><p className="mt-1 break-words font-bold text-white">{formatRuleTimestamp(monitorStatus?.next_run)}</p></div>
+                </div>
+                {monitorStatus?.last_error && <div className="mt-4 rounded-2xl border border-rose-400/25 bg-rose-500/10 p-4 text-sm text-rose-100">{monitorStatus.last_error}</div>}
+              </Card>
               <Card title="Activity Log" helper="Readable alert events: matches, skips, sends, and Telegram errors." icon={Activity} action={<button className="btn-muted" onClick={() => setConfirmClearLogs(true)}>Clear logs</button>}>
                 <div className="flex flex-wrap gap-2">
                   {logFilters.map((filter) => (

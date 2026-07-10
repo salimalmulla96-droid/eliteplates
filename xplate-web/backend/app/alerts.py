@@ -24,6 +24,7 @@ RUNNING_ALERTS: dict[str, bool] = {}
 DISABLED_SKIP_LOGGED: set[str] = set()
 SCHEDULER: BackgroundScheduler | None = None
 LAST_SCAN_TIME = ''
+LAST_TICK_AT = ''
 LAST_ERROR: str | None = None
 STOP_ALL_ALERTS_ACTIVE = False
 STOP_ALL_REQUESTED_AT = ''
@@ -32,6 +33,27 @@ AUTO_MAX_LISTINGS_PER_SCAN = 1000
 AUTO_FRESH_LISTING_WINDOW_MINUTES = 15
 LAST_PLATE_CLEANUP_DATE = ''
 logger = logging.getLogger(__name__)
+
+
+def _log_info(message: str, *args: Any) -> None:
+    if args:
+        message = message % args
+    logger.info(message)
+    print(message)
+
+
+def _log_warning(message: str, *args: Any) -> None:
+    if args:
+        message = message % args
+    logger.warning(message)
+    print(f"WARNING: {message}")
+
+
+def _log_exception(message: str, *args: Any) -> None:
+    if args:
+        message = message % args
+    logger.exception(message)
+    print(message)
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -74,9 +96,9 @@ def load_telegram_configuration(alert: Alert | dict[str, Any] | None = None) -> 
     chat_id = rule_chat or env_chat or settings_chat
 
     if not bot_token:
-        logger.error("Telegram bot token is missing")
+        logger.warning("Telegram bot token is missing")
     if not chat_id:
-        logger.error("Telegram chat ID is missing")
+        logger.warning("Telegram chat ID is missing")
     if bot_token and chat_id:
         sources = []
         sources.append('rule' if rule_token else 'environment' if env_token else 'settings')
@@ -91,10 +113,11 @@ def load_telegram_configuration(alert: Alert | dict[str, Any] | None = None) -> 
 
 
 def _report_timezone() -> ZoneInfo:
-    timezone_name = os.getenv("REPORT_TIMEZONE", "Asia/Dubai")
+    timezone_name = os.getenv("REPORT_TIMEZONE") or os.getenv("TZ") or "Asia/Dubai"
     try:
         return ZoneInfo(timezone_name)
     except Exception:
+        logger.warning("Invalid report timezone %s; falling back to UTC", timezone_name)
         return ZoneInfo("UTC")
 
 
@@ -1153,6 +1176,48 @@ def scheduler_running() -> bool:
 
 def active_alert_ids() -> list[str]:
     return [str(alert_id) for alert_id, running in RUNNING_ALERTS.items() if running]
+
+
+def _scheduler_interval_seconds() -> int:
+    try:
+        return max(int(os.getenv('ALERT_MONITOR_INTERVAL_SECONDS', '20') or 20), 5)
+    except Exception:
+        return 20
+
+
+def _monitor_next_run_iso() -> str:
+    if not SCHEDULER:
+        return ''
+    job = SCHEDULER.get_job('xplate_alert_monitor') or SCHEDULER.get_job('alerts_checker')
+    next_run = getattr(job, 'next_run_time', None) if job else None
+    return next_run.isoformat(timespec='seconds') if next_run else ''
+
+
+def monitor_status() -> dict[str, Any]:
+    alerts = get_alerts()
+    enabled_alerts = [alert for alert in alerts if _is_enabled_value(alert.get('enabled'))]
+    return {
+        'scheduler_running': scheduler_running(),
+        'enabled_rules': len(enabled_alerts),
+        'last_tick': LAST_TICK_AT,
+        'last_scan_time': LAST_SCAN_TIME,
+        'next_run': _monitor_next_run_iso(),
+        'active_alert_ids': active_alert_ids(),
+        'last_error': LAST_ERROR,
+        'timezone': str(_report_timezone()),
+        'monitor_interval_seconds': _scheduler_interval_seconds(),
+    }
+
+
+def _is_alert_due(alert: dict[str, Any], now: datetime) -> bool:
+    last = alert.get('last_checked_at') or alert.get('last_scan_at')
+    if not last:
+        return True
+    try:
+        last_dt = datetime.strptime(str(last), '%Y-%m-%d %H:%M:%S')
+        return now >= last_dt + timedelta(seconds=_get_interval_seconds(alert))
+    except Exception:
+        return True
 
 
 def _storage_alert_enabled(alert_id: str) -> bool:
@@ -2396,54 +2461,77 @@ def check_alert(alert_dict: dict[str, Any], dry_run: bool = False) -> dict[str, 
         return {'ok': False, 'error': str(exc)}
 
 
-def _check_due_alerts():
-    global LAST_SCAN_TIME, LAST_ERROR, LAST_PLATE_CLEANUP_DATE
+def run_all_enabled_alert_rules(force: bool = False) -> dict[str, Any]:
+    global LAST_SCAN_TIME, LAST_TICK_AT, LAST_ERROR, LAST_PLATE_CLEANUP_DATE
+
     alerts = get_alerts()
-    now = datetime.utcnow()
-    LAST_SCAN_TIME = now.strftime('%Y-%m-%d %H:%M:%S')
+    now_utc = datetime.utcnow()
+    now_local = datetime.now(_report_timezone())
+    LAST_SCAN_TIME = now_utc.strftime('%Y-%m-%d %H:%M:%S')
+    LAST_TICK_AT = now_local.isoformat(timespec='seconds')
+
+    enabled_alerts = [alert for alert in alerts if _is_enabled_value(alert.get('enabled'))]
+    result_summary: dict[str, Any] = {
+        'ok': True,
+        'enabled_rules': len(enabled_alerts),
+        'rules_scanned': 0,
+        'matches_found': 0,
+        'telegram_sent': 0,
+        'skipped_duplicates': 0,
+        'skipped_disabled': 0,
+        'skipped_not_due': 0,
+        'errors': [],
+        'last_tick': LAST_TICK_AT,
+    }
+
+    _log_info("Scheduled alert monitor tick started")
+    _log_info("Alerts loaded count: %s", len(alerts))
+    _log_info("Enabled rules found: %s", len(enabled_alerts))
+
     if stop_all_active():
         clear_scheduler_cache()
-        print("Alert scheduler scan skipped: emergency stop-all is active. No Telegram sends will run.")
-        return
+        _log_warning("Alert scheduler scan skipped: emergency stop-all is active. No Telegram sends will run.")
+        return result_summary
+
     if not alerts:
         clear_scheduler_cache()
-        print("Alert scheduler scan: no alerts found in storage. No Telegram sends will run.")
-        return
-    enabled_alerts = [a for a in alerts if _is_enabled_value(a.get('enabled'))]
-    active_ids = [str(a.get('id') or '') for a in enabled_alerts]
-    active_names = [str(a.get('name') or a.get('id') or '(unnamed)') for a in enabled_alerts]
-    active_cities = [
-        str(a.get('cities') or a.get('city') or 'All cities')
-        for a in enabled_alerts
-    ]
-    print(f"Alerts loaded count: {len(alerts)}")
-    print(f"Enabled alerts count: {len(enabled_alerts)}")
-    print(f"Alert scheduler scan active alert IDs: {', '.join(active_ids) if active_ids else '(none)'}")
-    print(f"Active alert names: {', '.join(active_names) if active_names else '(none)'}")
-    print(f"Active alert cities: {', '.join(active_cities) if active_cities else '(none)'}")
+        _log_warning("Alert scheduler scan: no alerts found in storage. No Telegram sends will run.")
+        return result_summary
+
     if not enabled_alerts:
         clear_scheduler_cache()
-        print("Alert scheduler scan: no enabled alerts in storage. No Telegram sends will run.")
-        return
+        _log_warning("Alert scheduler scan: no enabled alerts in storage. No Telegram sends will run.")
+        return result_summary
+
     config = get_config()
-    today = now.strftime('%Y-%m-%d')
+    today = now_local.strftime('%Y-%m-%d')
     if LAST_PLATE_CLEANUP_DATE != today:
         deleted = plate_tracking.cleanup_old_plates(config.cleanup_old_plates_days)
         LAST_PLATE_CLEANUP_DATE = today
-        print(f"Plate tracking cleanup: deleted {deleted} records older than {config.cleanup_old_plates_days} days")
-    for a in alerts:
+        _log_info("Plate tracking cleanup: deleted %s records older than %s days", deleted, config.cleanup_old_plates_days)
+
+    for alert_data in alerts:
+        alert_id = str(alert_data.get('id') or '').strip()
+        alert_name = str(alert_data.get('name') or alert_id or '(unnamed)')
         try:
-            print(f"Alert scheduler scan rule: id={a.get('id') or '(missing)'} name={a.get('name') or '(unnamed)'} cities={a.get('cities') or a.get('city') or 'All cities'} enabled={'yes' if _is_enabled_value(a.get('enabled')) else 'no'}")
-            if not _is_enabled_value(a.get('enabled')):
-                alert_id = str(a.get('id') or '').strip()
+            _log_info(
+                "Alert scheduler scan rule: id=%s name=%s cities=%s enabled=%s",
+                alert_id or '(missing)',
+                alert_name,
+                alert_data.get('cities') or alert_data.get('city') or 'All cities',
+                'yes' if _is_enabled_value(alert_data.get('enabled')) else 'no',
+            )
+
+            if not _is_enabled_value(alert_data.get('enabled')):
+                result_summary['skipped_disabled'] += 1
                 if alert_id and alert_id not in DISABLED_SKIP_LOGGED:
-                    alert = Alert(**_ensure_alert_city_fields(a))
+                    alert = Alert(**_ensure_alert_city_fields(alert_data))
                     DISABLED_SKIP_LOGGED.add(alert_id)
                     add_alert_log(AlertLog(
                         id=str(uuid.uuid4()),
                         alert_id=alert.id,
                         alert_name=alert.name,
-                        checked_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+                        checked_at=now_utc.strftime('%Y-%m-%d %H:%M:%S'),
                         status='disabled',
                         event_type='Skipped',
                         severity='warning',
@@ -2461,48 +2549,65 @@ def _check_due_alerts():
                         ],
                     ).model_dump())
                 continue
-            if a.get('id'):
-                DISABLED_SKIP_LOGGED.discard(str(a.get('id')))
-            last = a.get('last_checked_at')
-            interval_seconds = _get_interval_seconds(a)
-            due = False
-            if not last:
-                due = True
-            else:
-                try:
-                    last_dt = datetime.strptime(last, '%Y-%m-%d %H:%M:%S')
-                    due = now >= last_dt + timedelta(seconds=interval_seconds)
-                except Exception:
-                    due = True
-            alert_id = str(a.get('id') or '').strip()
-            if due and RUNNING_ALERTS.get(alert_id):
-                print(f"Alert scheduler skipped active scan: id={alert_id or '(missing)'} name={a.get('name') or '(unnamed)'}")
+
+            if alert_id:
+                DISABLED_SKIP_LOGGED.discard(alert_id)
+
+            if not force and not _is_alert_due(alert_data, now_utc):
+                result_summary['skipped_not_due'] += 1
+                _log_info("Alert scheduler skipped not-due rule: id=%s name=%s", alert_id or '(missing)', alert_name)
                 continue
-            if due:
-                RUNNING_ALERTS[alert_id] = True
-                try:
-                    print(
-                        f"Scan started: alert_id={alert_id or '(missing)'} "
-                        f"name={a.get('name') or '(unnamed)'} cities={a.get('cities') or a.get('city') or 'All cities'} "
-                        f"interval={interval_seconds}s"
-                    )
-                    result = check_alert(a)
-                    if not result.get('ok'):
-                        LAST_ERROR = str(result.get('error') or 'Alert scan failed')
-                finally:
-                    if stop_all_active():
-                        RUNNING_ALERTS.pop(alert_id, None)
-                    else:
-                        RUNNING_ALERTS[alert_id] = False
+
+            if RUNNING_ALERTS.get(alert_id):
+                _log_info("Alert scheduler skipped active scan: id=%s name=%s", alert_id or '(missing)', alert_name)
+                continue
+
+            RUNNING_ALERTS[alert_id] = True
+            try:
+                _log_info("Running rule: %s", alert_name)
+                _log_info(
+                    "Scan started: alert_id=%s name=%s cities=%s interval=%ss force=%s",
+                    alert_id or '(missing)',
+                    alert_name,
+                    alert_data.get('cities') or alert_data.get('city') or 'All cities',
+                    _get_interval_seconds(alert_data),
+                    'yes' if force else 'no',
+                )
+                scan_result = check_alert(alert_data)
+                result_summary['rules_scanned'] += 1
+                result_summary['matches_found'] += int(scan_result.get('matched') or 0)
+                result_summary['telegram_sent'] += int(scan_result.get('sent') or 0)
+                result_summary['skipped_duplicates'] += int(
+                    scan_result.get('skipped_duplicate') or scan_result.get('skipped_already_sent') or 0
+                )
+                _log_info("Raw results found: %s", scan_result.get('total_scraped') or scan_result.get('scraped') or 0)
+                _log_info("Filtered matches: %s", scan_result.get('matched') or 0)
+                _log_info("New Telegram matches: %s", scan_result.get('new_after_baseline') or 0)
+                if int(scan_result.get('sent') or 0) > 0:
+                    _log_info("Telegram send success: sent=%s rule=%s", scan_result.get('sent'), alert_name)
+                if int(scan_result.get('telegram_failed') or scan_result.get('failed') or 0) > 0:
+                    _log_warning("Telegram send failure: failed=%s rule=%s errors=%s", scan_result.get('failed'), alert_name, scan_result.get('errors') or [])
+                if not scan_result.get('ok'):
+                    result_summary['ok'] = False
+                    error_text = str(scan_result.get('error') or 'Alert scan failed')
+                    result_summary['errors'].append(error_text)
+                    LAST_ERROR = error_text
+            finally:
+                if stop_all_active():
+                    RUNNING_ALERTS.pop(alert_id, None)
+                else:
+                    RUNNING_ALERTS[alert_id] = False
         except MemoryError:
-            LAST_ERROR = f"MemoryError in scheduler for alert {a.get('id') or '(missing)'}"
-            print(LAST_ERROR)
-            RUNNING_ALERTS.pop(str(a.get('id') or ''), None)
+            LAST_ERROR = f"MemoryError in scheduler for alert {alert_id or '(missing)'}"
+            result_summary['ok'] = False
+            result_summary['errors'].append(LAST_ERROR)
+            _log_warning(LAST_ERROR)
+            RUNNING_ALERTS.pop(alert_id, None)
             add_alert_log(AlertLog(
                 id=str(uuid.uuid4()),
-                alert_id=str(a.get('id') or ''),
-                alert_name=str(a.get('name') or ''),
-                checked_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+                alert_id=alert_id,
+                alert_name=alert_name,
+                checked_at=now_utc.strftime('%Y-%m-%d %H:%M:%S'),
                 status='error',
                 event_type='Error',
                 severity='error',
@@ -2516,14 +2621,15 @@ def _check_due_alerts():
             continue
         except Exception as exc:
             LAST_ERROR = str(exc)
-            print(f"Alert scheduler error for id={a.get('id') or '(missing)'}: {exc}")
-            traceback.print_exc()
-            RUNNING_ALERTS.pop(str(a.get('id') or ''), None)
+            result_summary['ok'] = False
+            result_summary['errors'].append(str(exc))
+            _log_exception("Alert scheduler error for id=%s: %s", alert_id or '(missing)', exc)
+            RUNNING_ALERTS.pop(alert_id, None)
             add_alert_log(AlertLog(
                 id=str(uuid.uuid4()),
-                alert_id=str(a.get('id') or ''),
-                alert_name=str(a.get('name') or ''),
-                checked_at=now.strftime('%Y-%m-%d %H:%M:%S'),
+                alert_id=alert_id,
+                alert_name=alert_name,
+                checked_at=now_utc.strftime('%Y-%m-%d %H:%M:%S'),
                 status='error',
                 event_type='Error',
                 severity='error',
@@ -2535,6 +2641,25 @@ def _check_due_alerts():
                 details=[traceback.format_exc()],
             ).model_dump())
             continue
+
+    if not result_summary['errors']:
+        LAST_ERROR = None
+    _log_info(
+        "Scheduled alert monitor tick completed: enabled_rules=%s rules_scanned=%s matches_found=%s telegram_sent=%s skipped_duplicates=%s",
+        result_summary['enabled_rules'],
+        result_summary['rules_scanned'],
+        result_summary['matches_found'],
+        result_summary['telegram_sent'],
+        result_summary['skipped_duplicates'],
+    )
+    return result_summary
+
+
+def _check_due_alerts():
+    try:
+        run_all_enabled_alert_rules(force=False)
+    except Exception:
+        _log_exception("Scheduled alert monitor tick failed")
 
 
 def _daily_report_log(
@@ -2707,19 +2832,42 @@ def generate_previous_day_report():
 
 def start_scheduler():
     global SCHEDULER
-    if SCHEDULER is not None:
+    if SCHEDULER is not None and SCHEDULER.running:
+        _log_info("Xplate alert monitor scheduler already running")
         return SCHEDULER
+    if SCHEDULER is not None:
+        try:
+            SCHEDULER.shutdown(wait=False)
+        except Exception:
+            pass
+        SCHEDULER = None
     alerts = get_alerts()
-    settings = get_settings()
-    telegram_configured = bool(str(settings.get('telegram_bot_token', '') or '').strip() and normalize_telegram_channel_id(settings.get('telegram_chat_id', '') or settings.get('telegram_channel_id', '')))
-    print(f"Alert storage path: {ALERTS_PATH}")
-    print(f"Alert data directory: {DATA_DIR}")
-    print(f"Alerts loaded count: {len(alerts)}")
-    print(f"Enabled alerts count: {len([alert for alert in alerts if _is_enabled_value(alert.get('enabled'))])}")
-    print(f"Telegram configured: {'yes' if telegram_configured else 'no'}")
+    bot_token, chat_id = load_telegram_configuration()
+    telegram_configured = bool(bot_token and chat_id)
+    if not os.getenv('TELEGRAM_BOT_TOKEN'):
+        _log_warning("Railway variable TELEGRAM_BOT_TOKEN is not set; falling back to saved settings or rule credentials if available.")
+    if not (os.getenv('TELEGRAM_CHAT_ID') or os.getenv('TELEGRAM_CHANNEL_ID')):
+        _log_warning("Railway variable TELEGRAM_CHAT_ID is not set; falling back to saved settings or rule credentials if available.")
+    if not os.getenv('TZ'):
+        _log_warning("Railway variable TZ is not set; using %s for scheduler timezone.", _report_timezone())
+    _log_info("Xplate backend started")
+    _log_info("Alert storage path: %s", ALERTS_PATH)
+    _log_info("Alert data directory: %s", DATA_DIR)
+    _log_info("Alerts loaded count: %s", len(alerts))
+    _log_info("Enabled alerts count: %s", len([alert for alert in alerts if _is_enabled_value(alert.get('enabled'))]))
+    _log_info("Telegram configuration loaded: %s", 'yes' if telegram_configured else 'no')
     report_timezone = _report_timezone()
     SCHEDULER = BackgroundScheduler(timezone=report_timezone)
-    SCHEDULER.add_job(_check_due_alerts, 'interval', seconds=10, id='alerts_checker', max_instances=1, coalesce=True)
+    SCHEDULER.add_job(
+        _check_due_alerts,
+        'interval',
+        seconds=_scheduler_interval_seconds(),
+        id='xplate_alert_monitor',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(report_timezone),
+    )
     # Add daily Excel report generation job just after local report midnight.
     SCHEDULER.add_job(
         generate_previous_day_report,
@@ -2742,7 +2890,8 @@ def start_scheduler():
         timezone=report_timezone,
     )
     SCHEDULER.start()
-    print(f"Scheduler started: {'yes' if SCHEDULER.running else 'no'}")
+    _log_info("Xplate alert monitor scheduler started")
+    _log_info("Scheduler started: %s", 'yes' if SCHEDULER.running else 'no')
     return SCHEDULER
 
 

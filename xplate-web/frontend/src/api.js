@@ -76,6 +76,8 @@ export const api = {
   dashboardSummary: () => request('/api/dashboard/summary'),
   backupSummary: () => request('/api/backup/summary'),
   health: () => request('/api/health'),
+  alertMonitorStatus: () => request('/api/alerts/monitor/status'),
+  alertMonitorTick: () => request('/api/alerts/monitor/tick', { method: 'POST' }),
 }
 
 export async function getSellerPlates(payload) {

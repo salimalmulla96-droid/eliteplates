@@ -1,4 +1,5 @@
 import os
+import logging
 import threading
 import time
 import uuid
@@ -63,6 +64,8 @@ from . import instagram_monitor
 from . import plate_tracking
 from .alert_config import get_config
 
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 app = FastAPI(title="Xplate Scout API")
 
@@ -1578,6 +1581,34 @@ def api_production_status():
         'active_alert_ids': alerts_module.active_alert_ids(),
         'last_error': alerts_module.LAST_ERROR,
     }
+
+
+@app.get('/alerts/monitor/status')
+@app.get('/api/alerts/monitor/status')
+def api_alert_monitor_status():
+    return alerts_module.monitor_status()
+
+
+@app.post('/alerts/monitor/tick')
+@app.post('/api/alerts/monitor/tick')
+def api_alert_monitor_tick():
+    result = alerts_module.run_all_enabled_alert_rules(force=True)
+    status_code = 200 if result.get('ok') else 500
+    payload = {
+        'ok': bool(result.get('ok')),
+        'enabled_rules': int(result.get('enabled_rules') or 0),
+        'rules_scanned': int(result.get('rules_scanned') or 0),
+        'matches_found': int(result.get('matches_found') or 0),
+        'telegram_sent': int(result.get('telegram_sent') or 0),
+        'skipped_duplicates': int(result.get('skipped_duplicates') or 0),
+        'skipped_disabled': int(result.get('skipped_disabled') or 0),
+        'skipped_not_due': int(result.get('skipped_not_due') or 0),
+        'last_tick': result.get('last_tick') or '',
+        'errors': result.get('errors') or [],
+    }
+    if status_code != 200:
+        return JSONResponse(status_code=status_code, content=payload)
+    return payload
 
 
 @app.on_event('startup')
