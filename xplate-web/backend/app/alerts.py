@@ -2845,11 +2845,11 @@ def start_scheduler():
     bot_token, chat_id = load_telegram_configuration()
     telegram_configured = bool(bot_token and chat_id)
     if not os.getenv('TELEGRAM_BOT_TOKEN'):
-        _log_warning("Railway variable TELEGRAM_BOT_TOKEN is not set; falling back to saved settings or rule credentials if available.")
+        _log_warning("Render variable TELEGRAM_BOT_TOKEN is not set; falling back to saved settings or rule credentials if available.")
     if not (os.getenv('TELEGRAM_CHAT_ID') or os.getenv('TELEGRAM_CHANNEL_ID')):
-        _log_warning("Railway variable TELEGRAM_CHAT_ID is not set; falling back to saved settings or rule credentials if available.")
+        _log_warning("Render variable TELEGRAM_CHAT_ID is not set; falling back to saved settings or rule credentials if available.")
     if not os.getenv('TZ'):
-        _log_warning("Railway variable TZ is not set; using %s for scheduler timezone.", _report_timezone())
+        _log_warning("Render variable TZ is not set; using %s for scheduler timezone.", _report_timezone())
     _log_info("Xplate backend started")
     _log_info("Alert storage path: %s", ALERTS_PATH)
     _log_info("Alert data directory: %s", DATA_DIR)

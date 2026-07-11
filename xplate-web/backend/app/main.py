@@ -72,6 +72,8 @@ app = FastAPI(title="Xplate Scout API")
 allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
     "https://eliteplates-six.vercel.app",
     "https://eliteplates-snowy.vercel.app",
 ]
@@ -98,8 +100,21 @@ JOBS: dict[str, dict[str, Any]] = {}
 
 
 def _runtime_environment() -> str:
-    explicit = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or os.getenv("RAILWAY_ENVIRONMENT") or "").strip().lower()
-    if explicit in {"production", "prod"} or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+    explicit = (
+        os.getenv("ENVIRONMENT")
+        or os.getenv("APP_ENV")
+        or os.getenv("RENDER")
+        or os.getenv("RENDER_SERVICE_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT")
+        or ""
+    ).strip().lower()
+    if (
+        explicit in {"production", "prod"}
+        or os.getenv("RENDER")
+        or os.getenv("RENDER_SERVICE_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+    ):
         return "production"
     return "local"
 
@@ -112,7 +127,7 @@ def _telegram_configured() -> bool:
 def _log_production_startup() -> None:
     alerts = get_alerts()
     enabled_alerts = [alert for alert in alerts if _is_alert_enabled(alert)]
-    print("backend started")
+    print("Xplate backend started")
     print(f"environment: {_runtime_environment()}")
     print(f"DATA_DIR path: {DATA_DIR}")
     print(f"alerts storage path: {ALERTS_PATH}")
@@ -125,9 +140,9 @@ def _log_production_startup() -> None:
     print(f"favorites path: {FAVORITES_PATH}")
     print(f"alerts loaded count: {len(alerts)}")
     print(f"enabled alerts count: {len(enabled_alerts)}")
-    print(f"Telegram configured: {'yes' if _telegram_configured() else 'no'}")
+    print(f"Telegram configuration loaded: {'yes' if _telegram_configured() else 'no'}")
     print(f"scheduler started: {'yes' if alerts_module.scheduler_running() else 'no'}")
-    print(f"current Railway PORT: {os.getenv('PORT') or '(not set)'}")
+    print(f"current Render PORT: {os.getenv('PORT') or '(not set)'}")
     print(f"frontend URL / allowed CORS origins: {', '.join(allowed_origins)}")
 
 CITY_LABELS = {
@@ -295,6 +310,11 @@ def _seller_response(rows: list[dict[str, Any]], seed: SellerPlatesRequest) -> d
 @app.get("/")
 def root_health():
     return {"status": "ok", "app": "Xplate Scout"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.get("/api/health")
